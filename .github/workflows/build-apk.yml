@@ -33,7 +33,7 @@ jobs:
           cp -R android/app/src/main /tmp/expense_backup/android_main
 
           flutter create . \
-            --project-name expensetracker \
+            --project-name expense_tracker \
             --org com.example \
             --platforms android \
             --overwrite
