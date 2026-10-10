@@ -11,7 +11,7 @@ class AppDb {
     if (_db != null) return _db!;
     final path = p.join(await getDatabasesPath(), 'expense_tracker.db');
     _db = await openDatabase(path, version: 1, onConfigure: (db) async {
-      await db.execute('PRAGMA foreign_keys = ON');
+    
       await db.execute('PRAGMA journal_mode = WAL');
     }, onCreate: (db, version) async {
       await _createSchema(db);
