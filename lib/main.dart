@@ -9,12 +9,43 @@ final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigit
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await AppDb.instance.initialize();
-  final enabled = await AppDb.instance.getBoolSetting('daily_summary_enabled', fallback: true);
-  final hour = int.tryParse(await AppDb.instance.getSetting('daily_summary_hour', fallback: '21')) ?? 21;
-  final minute = int.tryParse(await AppDb.instance.getSetting('daily_summary_minute', fallback: '0')) ?? 0;
-  await NativeBridge.scheduleDailySummary(enabled: enabled, hour: hour, minute: minute);
   runApp(const ExpenseTrackerApp());
+
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _initializeServices();
+  });
+}
+
+Future<void> _initializeServices() async {
+  try {
+    await AppDb.instance.initialize();
+
+    final enabled = await AppDb.instance.getBoolSetting(
+      'daily_summary_enabled',
+      fallback: true,
+    );
+    final hour = int.tryParse(
+      await AppDb.instance.getSetting(
+        'daily_summary_hour',
+        fallback: '21',
+      ),
+    ) ?? 21;
+    final minute = int.tryParse(
+      await AppDb.instance.getSetting(
+        'daily_summary_minute',
+        fallback: '0',
+      ),
+    ) ?? 0;
+
+    await NativeBridge.scheduleDailySummary(
+      enabled: enabled,
+      hour: hour,
+      minute: minute,
+    );
+  } catch (error, stackTrace) {
+    debugPrint('Service initialization failed: $error');
+    debugPrintStack(stackTrace: stackTrace);
+  }
 }
 
 class ExpenseTrackerApp extends StatelessWidget {
