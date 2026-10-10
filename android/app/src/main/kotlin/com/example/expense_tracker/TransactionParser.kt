@@ -14,25 +14,38 @@ data class ParsedTransaction(
 )
 
 object TransactionParser {
-    private val amountRegex = Regex("""(?:INR|RS\.?|₹)\s*([0-9][0-9,]*(?:\.\d{1,2})?)""", RegexOption.IGNORE_CASE)
-    private val accountRegex = Regex("""(?:A/?C|ACCT|ACCOUNT|CARD)\s*(?:NO\.?|XX|X+)?\s*([0-9X*]{3,8})""", RegexOption.IGNORE_CASE)
-    private val merchantRegex = Regex("""(?:\bTO\b|\bAT\b)\s+([A-Z0-9*._@& -]{2,50})""", RegexOption.IGNORE_CASE)
+    private val accountRegex = Regex(
+        """(?:A/?C|ACCT|ACCOUNT|CARD)\s*(?:NO\.?|XX|X+)?\s*([0-9X*]{3,8})""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private val merchantRegex = Regex(
+        """(?:\bTO\b|\bAT\b)\s+([A-Z0-9*._@& -]{2,50})""",
+        RegexOption.IGNORE_CASE
+    )
 
     fun looksFinancial(message: String): Boolean {
-        val text = message.uppercase()
-        if (text.contains("OTP") || text.contains("ONE TIME PASSWORD") || text.contains("VERIFICATION CODE")) return false
-        if (amountRegex.find(message) == null) return false
-        return listOf("DEBITED", "CREDITED", "SPENT", "PURCHASE", "PAID", "PAYMENT", "WITHDRAWN", "WITHDRAWAL", "RECEIVED", "REFUND", "REVERSED", "CASHBACK", "UPI", "IMPS", "NEFT", "RTGS", "SIP", "INVEST").any { text.contains(it) }
+        return SmsClassifier.classify("", message).action != SmsAction.IGNORE
     }
 
-    fun parse(sender: String, message: String, db: ExpenseDatabase, occurredAt: Long = System.currentTimeMillis()): ParsedTransaction? {
-        if (!looksFinancial(message)) return null
-        val amount = amountRegex.find(message)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull() ?: return null
+    fun parse(
+        sender: String,
+        message: String,
+        db: ExpenseDatabase,
+        occurredAt: Long = System.currentTimeMillis()
+    ): ParsedTransaction? {
+        val classification = SmsClassifier.classify(sender, message)
+
+        if (!classification.shouldImport) return null
+
+        val amount = SmsClassifier.extractAmount(message) ?: return null
         val rule = db.findRule(message)
         val text = message.uppercase()
-        val type = rule?.type ?: detectType(text)
+
+        val type = rule?.type ?: classification.type ?: detectType(text)
         val category = rule?.category ?: defaultCategory(type)
         val merchant = rule?.merchant ?: extractMerchant(message)
+
         val paymentMethod = when {
             text.contains("UPI") -> "UPI"
             text.contains("IMPS") -> "IMPS"
@@ -42,16 +55,51 @@ object TransactionParser {
             text.contains("CARD") -> "Card"
             else -> "Bank"
         }
-        val accountHint = accountRegex.find(message)?.groupValues?.getOrNull(1)?.takeLast(4) ?: ""
-        val fingerprint = "${sender.lowercase()}-${Integer.toHexString(message.trim().lowercase().hashCode())}"
-        return ParsedTransaction(amount, type, category, merchant.ifBlank { "Unknown merchant" }, sender, paymentMethod, accountHint, message, occurredAt, fingerprint)
+
+        val accountHint = accountRegex.find(message)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeLast(4)
+            ?: ""
+
+        val fingerprint = SmsClassifier.fingerprint(sender, message)
+
+        return ParsedTransaction(
+            amount,
+            type,
+            category,
+            merchant.ifBlank { "Unknown merchant" },
+            sender,
+            paymentMethod,
+            accountHint,
+            message,
+            occurredAt,
+            fingerprint
+        )
     }
 
     private fun detectType(text: String): String {
-        if (listOf("SIP", "MUTUAL FUND", "ZERODHA", "GROWW", "SECURITIES", "DEMAT", "INVEST").any { text.contains(it) }) return "investment"
-        if (listOf("REFUND", "REVERSED", "REVERSAL", "CASHBACK").any { text.contains(it) }) return "refund"
-        if (listOf("SELF TRANSFER", "OWN ACCOUNT", "TRANSFER BETWEEN").any { text.contains(it) }) return "transfer"
-        if (text.contains("CREDITED") || text.contains("RECEIVED")) return "income"
+        if (
+            listOf(
+                "SIP", "MUTUAL FUND", "ZERODHA", "GROWW",
+                "SECURITIES", "DEMAT", "INVEST"
+            ).any { text.contains(it) }
+        ) return "investment"
+
+        if (
+            listOf("REFUND", "REVERSED", "REVERSAL", "CASHBACK")
+                .any { text.contains(it) }
+        ) return "refund"
+
+        if (
+            listOf("SELF TRANSFER", "OWN ACCOUNT", "TRANSFER BETWEEN")
+                .any { text.contains(it) }
+        ) return "transfer"
+
+        if (text.contains("CREDITED") || text.contains("RECEIVED")) {
+            return "income"
+        }
+
         return "expense"
     }
 
@@ -68,10 +116,12 @@ object TransactionParser {
         var merchant = match.groupValues[1].trim()
         val upper = merchant.uppercase()
         var cut = merchant.length
+
         for (stop in listOf(" ON ", " VIA ", " REF ", " AVAIL", " AVL ", " BAL ", " FROM ")) {
-            val i = upper.indexOf(stop)
-            if (i >= 0 && i < cut) cut = i
+            val index = upper.indexOf(stop)
+            if (index >= 0 && index < cut) cut = index
         }
+
         merchant = merchant.substring(0, cut).trim(' ', '.', '-', '*')
         return merchant.take(40).ifBlank { "Unknown merchant" }
     }
