@@ -12,7 +12,7 @@ class AppDb {
     final path = p.join(await getDatabasesPath(), 'expense_tracker.db');
     _db = await openDatabase(path, version: 1, onConfigure: (db) async {
     
-      await db.execute('PRAGMA journal_mode = WAL');
+      
     }, onCreate: (db, version) async {
       await _createSchema(db);
     }, onOpen: (db) async {
