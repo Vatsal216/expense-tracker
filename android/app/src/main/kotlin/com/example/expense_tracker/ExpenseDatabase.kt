@@ -6,12 +6,45 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import java.util.Calendar
 
+
 data class RuleMatch(val merchant: String, val type: String, val category: String, val keyword: String)
 
-class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tracker.db", null, 1) {
-    override fun onCreate(db: SQLiteDatabase) { createSchema(db); seed(db) }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
-    override fun onConfigure(db: SQLiteDatabase) { super.onConfigure(db); db.setForeignKeyConstraintsEnabled(true); db.enableWriteAheadLogging() }
+data class ParsedTransaction(
+    val amount: Double,
+    val type: String,
+    val category: String,
+    val merchant: String,
+    val note: String,
+    val rawMessage: String,
+    val sender: String,
+    val paymentMethod: String,
+    val accountHint: String,
+    val upiReference: String,
+    val occurredAt: Long,
+    val fingerprint: String,
+    val classificationMethod: String = "hybrid",
+    val classificationConfidence: Double = 1.0,
+)
+
+class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tracker.db", null, 3) {
+    override fun onCreate(db: SQLiteDatabase) {
+        createSchema(db)
+        seed(db)
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        createSchema(db)
+        ensureColumn(db, "transactions", "note", "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(db, "transactions", "upi_reference", "TEXT NOT NULL DEFAULT ''")
+        ensureColumn(db, "transactions", "classification_method", "TEXT NOT NULL DEFAULT 'legacy'")
+        ensureColumn(db, "transactions", "classification_confidence", "REAL NOT NULL DEFAULT 1.0")
+        seed(db)
+    }
+
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.setForeignKeyConstraintsEnabled(true)
+    }
 
     private fun createSchema(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE IF NOT EXISTS transactions(
@@ -20,11 +53,15 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
             type TEXT NOT NULL,
             category TEXT NOT NULL,
             merchant TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL,
             raw_message TEXT NOT NULL DEFAULT '',
             sender TEXT NOT NULL DEFAULT '',
             payment_method TEXT NOT NULL DEFAULT '',
             account_hint TEXT NOT NULL DEFAULT '',
+            upi_reference TEXT NOT NULL DEFAULT '',
+            classification_method TEXT NOT NULL DEFAULT 'legacy',
+            classification_confidence REAL NOT NULL DEFAULT 1.0,
             occurred_at INTEGER NOT NULL,
             created_at INTEGER NOT NULL,
             fingerprint TEXT NOT NULL UNIQUE,
@@ -55,6 +92,21 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
         )""".trimIndent())
     }
 
+    private fun ensureColumn(db: SQLiteDatabase, table: String, column: String, definition: String) {
+        val exists = db.rawQuery("PRAGMA table_info($table)", null).use { c ->
+            val nameIndex = c.getColumnIndex("name")
+            var found = false
+            while (c.moveToNext()) {
+                if (nameIndex >= 0 && c.getString(nameIndex) == column) {
+                    found = true
+                    break
+                }
+            }
+            found
+        }
+        if (!exists) db.execSQL("ALTER TABLE $table ADD COLUMN $column $definition")
+    }
+
     private fun seed(db: SQLiteDatabase) {
         val now = System.currentTimeMillis()
         val categories = listOf(
@@ -63,11 +115,13 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
             "Healthcare" to "expense", "Travel" to "expense", "Education" to "expense",
             "Rent & Housing" to "expense", "EMI & Loans" to "expense", "Insurance" to "expense",
             "Stocks" to "investment", "Mutual Funds" to "investment", "Gold" to "investment",
-            "Fixed Deposit" to "investment", "Other Investment" to "investment", "Salary" to "income",
-            "Refund" to "refund", "Transfer" to "transfer", "Uncategorized" to "expense"
+            "Other Investment" to "investment", "Salary" to "income", "Refund" to "refund",
+            "Transfer" to "transfer", "Uncategorized" to "expense"
         )
         for ((name, kind) in categories) {
-            val v = ContentValues().apply { put("name", name); put("kind", kind); put("is_system", 1); put("created_at", now) }
+            val v = ContentValues().apply {
+                put("name", name); put("kind", kind); put("is_system", 1); put("created_at", now)
+            }
             db.insertWithOnConflict("categories", null, v, SQLiteDatabase.CONFLICT_IGNORE)
         }
 
@@ -98,19 +152,27 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
                 c.moveToFirst()
                 if (c.getInt(0) == 0) {
                     val v = ContentValues().apply {
-                        put("merchant", r[0]); put("keyword", r[1]); put("type", r[2]); put("category", r[3]);
+                        put("merchant", r[0]); put("keyword", r[1]); put("type", r[2]); put("category", r[3])
                         put("is_user_rule", 0); put("enabled", 1); put("created_at", now)
                     }
                     db.insert("rules", null, v)
                 }
             }
         }
+
         settingIfMissing(db, "sms_tracking_enabled", "0")
+        settingIfMissing(db, "phonepe_notification_enabled", "0")
         settingIfMissing(db, "notifications_enabled", "1")
         settingIfMissing(db, "daily_summary_enabled", "1")
         settingIfMissing(db, "daily_summary_hour", "21")
         settingIfMissing(db, "daily_summary_minute", "0")
-        val b = ContentValues().apply { put("category", "__overall__"); put("amount", 30000.0); put("period", "monthly") }
+        settingIfMissing(db, "hybrid_classifier_enabled", "1")
+        settingIfMissing(db, "classifier_confidence_threshold", "0.56")
+        settingIfMissing(db, "learn_from_corrections", "1")
+
+        val b = ContentValues().apply {
+            put("category", "__overall__"); put("amount", 30000.0); put("period", "monthly")
+        }
         db.insertWithOnConflict("budgets", null, b, SQLiteDatabase.CONFLICT_IGNORE)
     }
 
@@ -119,50 +181,94 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
         db.insertWithOnConflict("settings", null, v, SQLiteDatabase.CONFLICT_IGNORE)
     }
 
-    fun getSetting(key: String, fallback: String): String = readableDatabase.rawQuery("SELECT value FROM settings WHERE key=? LIMIT 1", arrayOf(key)).use { c -> if (c.moveToFirst()) c.getString(0) else fallback }
+    fun getSetting(key: String, fallback: String): String = readableDatabase
+        .rawQuery("SELECT value FROM settings WHERE key=? LIMIT 1", arrayOf(key))
+        .use { c -> if (c.moveToFirst()) c.getString(0) else fallback }
 
-    fun findRule(fullSms: String): RuleMatch? {
-        val text = fullSms.lowercase()
-        readableDatabase.rawQuery("SELECT merchant,keyword,type,category FROM rules WHERE enabled=1 ORDER BY is_user_rule DESC,id ASC", null).use { c ->
+    fun findRule(fullText: String): RuleMatch? {
+        val text = fullText.lowercase()
+        readableDatabase.rawQuery(
+            "SELECT merchant,keyword,type,category FROM rules WHERE enabled=1 ORDER BY is_user_rule DESC,id ASC",
+            null
+        ).use { c ->
             while (c.moveToNext()) {
                 val keyword = c.getString(1).lowercase()
-                if (keyword.isNotBlank() && text.contains(keyword)) return RuleMatch(c.getString(0), c.getString(2), c.getString(3), keyword)
+                if (keyword.isNotBlank() && text.contains(keyword)) {
+                    return RuleMatch(c.getString(0), c.getString(2), c.getString(3), keyword)
+                }
             }
         }
         return null
     }
 
-    fun insertTransaction(tx: ParsedTransaction): Long {
+    fun insertTransaction(tx: ParsedTransaction, source: String): Long {
         val v = ContentValues().apply {
-            put("amount", tx.amount); put("type", tx.type); put("category", tx.category); put("merchant", tx.merchant)
-            put("source", "sms"); put("raw_message", tx.rawMessage); put("sender", tx.sender); put("payment_method", tx.paymentMethod)
-            put("account_hint", tx.accountHint); put("occurred_at", tx.occurredAt); put("created_at", System.currentTimeMillis())
-            put("fingerprint", tx.fingerprint); put("is_manual", 0)
+            put("amount", tx.amount)
+            put("type", tx.type)
+            put("category", tx.category)
+            put("merchant", tx.merchant)
+            put("note", tx.note)
+            put("source", source)
+            put("raw_message", tx.rawMessage)
+            put("sender", tx.sender)
+            put("payment_method", tx.paymentMethod)
+            put("account_hint", tx.accountHint)
+            put("upi_reference", tx.upiReference)
+            put("classification_method", tx.classificationMethod)
+            put("classification_confidence", tx.classificationConfidence)
+            put("occurred_at", tx.occurredAt)
+            put("created_at", System.currentTimeMillis())
+            put("fingerprint", tx.fingerprint)
+            put("is_manual", 0)
         }
-        return writableDatabase.insertWithOnConflict("transactions", null, v, SQLiteDatabase.CONFLICT_IGNORE)
+        return writableDatabase.insertWithOnConflict(
+            "transactions",
+            null,
+            v,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
     }
 
     fun currentMonthExpenseTotal(): Double {
         val r = monthRange()
-        return readableDatabase.rawQuery("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND occurred_at>=? AND occurred_at<?", arrayOf(r.first.toString(), r.second.toString())).use { c -> c.moveToFirst(); c.getDouble(0) }
+        return readableDatabase.rawQuery(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND occurred_at>=? AND occurred_at<?",
+            arrayOf(r.first.toString(), r.second.toString())
+        ).use { c -> c.moveToFirst(); c.getDouble(0) }
     }
 
     fun currentMonthCategoryExpense(category: String): Double {
         val r = monthRange()
-        return readableDatabase.rawQuery("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND category=? AND occurred_at>=? AND occurred_at<?", arrayOf(category, r.first.toString(), r.second.toString())).use { c -> c.moveToFirst(); c.getDouble(0) }
+        return readableDatabase.rawQuery(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND category=? AND occurred_at>=? AND occurred_at<?",
+            arrayOf(category, r.first.toString(), r.second.toString())
+        ).use { c -> c.moveToFirst(); c.getDouble(0) }
     }
 
-    fun budgetFor(category: String): Double? = readableDatabase.rawQuery("SELECT amount FROM budgets WHERE category=? LIMIT 1", arrayOf(category)).use { c -> if (c.moveToFirst()) c.getDouble(0) else null }
+    fun budgetFor(category: String): Double? = readableDatabase.rawQuery(
+        "SELECT amount FROM budgets WHERE category=? LIMIT 1", arrayOf(category)
+    ).use { c -> if (c.moveToFirst()) c.getDouble(0) else null }
 
     fun todayTotals(): Pair<Double, Double> {
-        val cal = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-        val start = cal.timeInMillis; cal.add(Calendar.DAY_OF_MONTH, 1); val end = cal.timeInMillis
-        fun total(type: String): Double = readableDatabase.rawQuery("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type=? AND occurred_at>=? AND occurred_at<?", arrayOf(type, start.toString(), end.toString())).use { c -> c.moveToFirst(); c.getDouble(0) }
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = cal.timeInMillis
+        cal.add(Calendar.DAY_OF_MONTH, 1)
+        val end = cal.timeInMillis
+        fun total(type: String): Double = readableDatabase.rawQuery(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type=? AND occurred_at>=? AND occurred_at<?",
+            arrayOf(type, start.toString(), end.toString())
+        ).use { c -> c.moveToFirst(); c.getDouble(0) }
         return total("expense") to total("investment")
     }
 
     private fun monthRange(): Pair<Long, Long> {
-        val cal = Calendar.getInstance().apply { set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0) }
-        val start = cal.timeInMillis; cal.add(Calendar.MONTH, 1); return start to cal.timeInMillis
+        val cal = Calendar.getInstance().apply {
+            set(Calendar.DAY_OF_MONTH, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = cal.timeInMillis
+        cal.add(Calendar.MONTH, 1)
+        return start to cal.timeInMillis
     }
 }

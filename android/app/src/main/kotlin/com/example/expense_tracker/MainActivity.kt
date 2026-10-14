@@ -1,6 +1,8 @@
 package com.example.expense_tracker
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -14,8 +16,10 @@ class MainActivity : FlutterActivity() {
     private val channelName = "expense_tracker/native"
     private val smsRequestCode = 7001
     private val notificationRequestCode = 7002
+    private val upiRequestCode = 7100
     private var pendingSmsResult: MethodChannel.Result? = null
     private var pendingNotificationResult: MethodChannel.Result? = null
+    private var pendingUpiResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -25,6 +29,11 @@ class MainActivity : FlutterActivity() {
                 "hasSmsPermission" -> result.success(hasSmsPermission())
                 "requestNotificationPermission" -> requestNotificationPermission(result)
                 "hasNotificationPermission" -> result.success(hasNotificationPermission())
+                "hasNotificationListenerPermission" -> result.success(hasNotificationListenerPermission())
+                "openNotificationAccessSettings" -> {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    result.success(null)
+                }
                 "scheduleDailySummary" -> {
                     val enabled = call.argument<Boolean>("enabled") ?: true
                     val hour = call.argument<Int>("hour") ?: 21
@@ -36,33 +45,134 @@ class MainActivity : FlutterActivity() {
                     startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
                     result.success(null)
                 }
+                "startUpiPayment" -> startUpiPayment(call.arguments as? Map<*, *>, result)
                 else -> result.notImplemented()
             }
         }
     }
 
-    private fun hasSmsPermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+    private fun hasSmsPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
+
     private fun requestSmsPermission(result: MethodChannel.Result) {
-        if (hasSmsPermission()) { result.success(true); return }
+        if (hasSmsPermission()) {
+            result.success(true)
+            return
+        }
         pendingSmsResult = result
         requestPermissions(arrayOf(Manifest.permission.RECEIVE_SMS), smsRequestCode)
     }
 
-    private fun hasNotificationPermission(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    private fun hasNotificationPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+
     private fun requestNotificationPermission(result: MethodChannel.Result) {
-        if (hasNotificationPermission()) { result.success(true); return }
+        if (hasNotificationPermission()) {
+            result.success(true)
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             pendingNotificationResult = result
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), notificationRequestCode)
-        } else result.success(true)
+        } else {
+            result.success(true)
+        }
+    }
+
+    private fun hasNotificationListenerPermission(): Boolean {
+        val enabled = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
+        return enabled.contains(packageName)
+    }
+
+    private fun startUpiPayment(args: Map<*, *>?, result: MethodChannel.Result) {
+        val upiId = args?.get("upiId")?.toString()?.trim().orEmpty()
+        val payeeName = args?.get("payeeName")?.toString()?.trim().orEmpty()
+        val amount = args?.get("amount")?.toString()?.trim().orEmpty()
+        val note = args?.get("note")?.toString()?.trim().orEmpty()
+
+        if (upiId.isBlank() || payeeName.isBlank() || amount.isBlank()) {
+            result.error("INVALID_UPI", "UPI ID, payee name and amount are required.", null)
+            return
+        }
+
+        val uri = Uri.Builder()
+            .scheme("upi")
+            .authority("pay")
+            .appendQueryParameter("pa", upiId)
+            .appendQueryParameter("pn", payeeName)
+            .appendQueryParameter("am", amount)
+            .appendQueryParameter("cu", "INR")
+            .appendQueryParameter("tn", note)
+            .build()
+
+        val baseIntent = Intent(Intent.ACTION_VIEW, uri)
+        val phonePeIntent = Intent(baseIntent).apply { setPackage("com.phonepe.app") }
+        pendingUpiResult = result
+
+        try {
+            if (phonePeIntent.resolveActivity(packageManager) != null) {
+                startActivityForResult(phonePeIntent, upiRequestCode)
+            } else if (baseIntent.resolveActivity(packageManager) != null) {
+                startActivityForResult(Intent.createChooser(baseIntent, "Pay with UPI"), upiRequestCode)
+            } else {
+                pendingUpiResult = null
+                result.error("NO_UPI_APP", "No UPI app is available on this device.", null)
+            }
+        } catch (e: ActivityNotFoundException) {
+            pendingUpiResult = null
+            result.error("NO_UPI_APP", "No compatible UPI app was found.", null)
+        } catch (e: Exception) {
+            pendingUpiResult = null
+            result.error("UPI_LAUNCH_FAILED", e.message, null)
+        }
+    }
+
+    @Deprecated("Deprecated in Android API but retained for UPI app result compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != upiRequestCode) return
+
+        val raw = data?.getStringExtra("response")
+            ?: data?.dataString
+            ?: data?.extras?.keySet()?.joinToString("&") { key -> "$key=${data.extras?.get(key)}" }
+            ?: ""
+
+        val parsed = mutableMapOf<String, String>()
+        raw.split("&").forEach { part ->
+            val pair = part.split("=", limit = 2)
+            if (pair.size == 2) parsed[pair[0].trim().lowercase()] = pair[1].trim()
+        }
+
+        val status = parsed["status"]
+            ?: if (resultCode == Activity.RESULT_CANCELED) "cancelled" else "unknown"
+
+        pendingUpiResult?.success(
+            mapOf(
+                "status" to status,
+                "txnId" to (parsed["txnid"] ?: parsed["txn_id"] ?: ""),
+                "txnRef" to (parsed["txnref"] ?: parsed["txn_ref"] ?: ""),
+                "approvalRefNo" to (parsed["approvalrefno"] ?: parsed["approval_ref_no"] ?: ""),
+                "responseCode" to (parsed["responsecode"] ?: parsed["response_code"] ?: ""),
+                "raw" to raw,
+            )
+        )
+        pendingUpiResult = null
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
         when (requestCode) {
-            smsRequestCode -> { pendingSmsResult?.success(granted); pendingSmsResult = null }
-            notificationRequestCode -> { pendingNotificationResult?.success(granted); pendingNotificationResult = null }
+            smsRequestCode -> {
+                pendingSmsResult?.success(granted)
+                pendingSmsResult = null
+            }
+            notificationRequestCode -> {
+                pendingNotificationResult?.success(granted)
+                pendingNotificationResult = null
+            }
         }
     }
 }
