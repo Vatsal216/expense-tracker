@@ -27,6 +27,8 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        // Screenshots are intentionally enabled in v15 while UI testing is ongoing.
+        window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
             when (call.method) {
                 "requestSmsPermission" -> requestSmsPermission(result)
@@ -54,9 +56,8 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(null)
                 }
                 "setSecureScreen" -> {
-                    val enabled = call.argument<Boolean>("enabled") ?: true
-                    if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                    else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    // Temporarily disabled by product request so screenshots can be used for UI QA.
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                     result.success(null)
                 }
                 "updateHomeWidget" -> {
@@ -232,14 +233,12 @@ class MainActivity : FlutterFragmentActivity() {
             .build()
 
         val baseIntent = Intent(Intent.ACTION_VIEW, uri)
-        val phonePeIntent = Intent(baseIntent).apply { setPackage("com.phonepe.app") }
         pendingUpiResult = result
 
         try {
-            if (phonePeIntent.resolveActivity(packageManager) != null) {
-                startActivityForResult(phonePeIntent, upiRequestCode)
-            } else if (baseIntent.resolveActivity(packageManager) != null) {
-                startActivityForResult(Intent.createChooser(baseIntent, "Pay with UPI"), upiRequestCode)
+            if (baseIntent.resolveActivity(packageManager) != null) {
+                // Let Android show every compatible installed UPI app (GPay, PhonePe, Paytm, etc.).
+                startActivityForResult(Intent.createChooser(baseIntent, "Choose UPI app"), upiRequestCode)
             } else {
                 pendingUpiResult = null
                 result.error("NO_UPI_APP", "No UPI app is available on this device.", null)

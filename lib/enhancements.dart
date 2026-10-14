@@ -23,8 +23,12 @@ final _date = DateFormat('dd MMM yyyy, h:mm a');
 Future<void> loadEnhancedPreferences() async {
   final dark = await AppDb.instance.getBoolSetting('dark_mode');
   expenseThemeMode.value = dark ? ThemeMode.dark : ThemeMode.light;
-  final secure = await AppDb.instance.getBoolSetting('secure_screen_enabled', fallback: true);
-  try { await NativeBridge.setSecureScreen(secure); } catch (_) {}
+
+  // v15 QA/stability release: screenshots are deliberately enabled.
+  // Clear any persisted v12-v14 secure-screen preference so an upgrade cannot
+  // keep FLAG_SECURE active. We can reintroduce this after UI testing is done.
+  await AppDb.instance.setSetting('secure_screen_enabled', '0');
+  try { await NativeBridge.setSecureScreen(false); } catch (_) {}
 }
 
 Future<void> runDailySmartAlerts() async {
@@ -121,8 +125,6 @@ class EnhancementHubPage extends StatelessWidget {
     final items = <_HubItem>[
       _HubItem('Smart automation', 'Control transfer matching, dedup, recurring detection and alerts.', Icons.tune_rounded, const SmartAutomationPage()),
       _HubItem('Smart transfers', 'Match your own-account debit and credit pairs.', Icons.swap_horiz_rounded, const SmartTransfersPage()),
-      _HubItem('Recurring & subscriptions', 'Detect bills, SIPs, EMIs and subscriptions.', Icons.autorenew_rounded, const RecurringPaymentsPage()),
-      _HubItem('Accounts', 'Detected bank/account hints and balances.', Icons.account_balance_rounded, const AccountsPage()),
       _HubItem('Merchant cleanup', 'Merge messy merchant names into one merchant.', Icons.storefront_rounded, const MerchantAliasesPage()),
       _HubItem('Advanced search', 'Search by merchant, amount, category and source.', Icons.manage_search_rounded, const AdvancedSearchPage()),
       _HubItem('Cash flow', 'Savings rate, daily average and month-end projection.', Icons.ssid_chart_rounded, const CashFlowPage()),
@@ -131,12 +133,12 @@ class EnhancementHubPage extends StatelessWidget {
       _HubItem('Export & encrypted backup', 'CSV/PDF export and protected backup/restore.', Icons.ios_share_rounded, const ExportBackupPage()),
       _HubItem('Needs review', 'Review low-confidence ML detections.', Icons.fact_check_rounded, const ReviewQueuePage()),
       _HubItem('ML feedback', 'See accepted, corrected and ignored classifications.', Icons.psychology_alt_rounded, const ModelFeedbackPage()),
-      _HubItem('Net worth', 'Track assets, liabilities and selected account balances.', Icons.account_balance_wallet_rounded, const NetWorthPage()),
-      _HubItem('Privacy & appearance', 'Biometric lock, secure screen and dark mode.', Icons.security_rounded, const PrivacyAppearancePage()),
+      _HubItem('Net worth', 'Optional manual assets and liabilities.', Icons.account_balance_wallet_rounded, const NetWorthPage()),
+      _HubItem('Privacy & appearance', 'Biometric lock and dark mode. Screenshots stay enabled during QA.', Icons.security_rounded, const PrivacyAppearancePage()),
       _HubItem('Home widget', 'Refresh the Android spending widget.', Icons.widgets_rounded, const HomeWidgetPage()),
     ];
     return Scaffold(
-      appBar: AppBar(title: const Text('Smart Finance Hub')),
+      appBar: AppBar(title: const Text('More tools')),
       body: ListView.separated(
         padding: const EdgeInsets.all(16),
         itemCount: items.length,
@@ -266,14 +268,94 @@ class _SmartTransfersPageState extends State<SmartTransfersPage> {
 
 class RecurringPaymentsPage extends StatelessWidget {
   const RecurringPaymentsPage({super.key});
-  @override Widget build(BuildContext context)=>Scaffold(
-    appBar:AppBar(title:const Text('Recurring payments')),
-    body:FutureBuilder<List<Map<String,Object?>>>(future:AppDb.instance.detectRecurringPayments(),builder:(context,s){
-      if(!s.hasData)return const Center(child:CircularProgressIndicator());
-      final data=s.data!; if(data.isEmpty)return const _EmptyInfo(icon:Icons.autorenew,title:'No recurring pattern yet',text:'Recurring detection needs at least two similar payments with a weekly, monthly, quarterly or yearly pattern.');
-      return ListView.builder(padding:const EdgeInsets.all(16),itemCount:data.length,itemBuilder:(context,i){final r=data[i];return Card(child:ListTile(leading:const CircleAvatar(child:Icon(Icons.repeat)),title:Text('${r['merchant']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('${r['category']} • every ~${r['intervalDays']} days • ${r['occurrences']} occurrences\nNext expected: ${DateFormat('dd MMM').format(DateTime.fromMillisecondsSinceEpoch(r['nextDue'] as int))}'),trailing:Text(_money.format(r['averageAmount']),style:const TextStyle(fontWeight:FontWeight.w900))));});
-    }),
-  );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Recurring payments')),
+        body: FutureBuilder<List<Map<String, Object?>>>(
+          future: AppDb.instance.detectRecurringPayments(),
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return _EmptyInfo(
+                icon: Icons.error_outline,
+                title: 'Could not analyze recurring payments',
+                text: '${snap.error}',
+              );
+            }
+            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+            final data = snap.data!;
+            if (data.isEmpty) {
+              return const _EmptyInfo(
+                icon: Icons.autorenew,
+                title: 'No strong recurring pattern yet',
+                text: 'To reduce false positives, the app normally requires at least 3 completed similar payments with a stable interval and amount. Two can qualify only when the SMS itself clearly says subscription, EMI, SIP, autopay, premium or renewal.',
+              );
+            }
+            return ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              itemCount: data.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 12),
+              itemBuilder: (context, i) {
+                final r = data[i];
+                final due = DateTime.fromMillisecondsSinceEpoch((r['nextDue'] as num).toInt());
+                final confidence = (((r['confidence'] as num?)?.toDouble() ?? 0) * 100).round();
+                final variation = (r['amountVariationPct'] as num?)?.toDouble() ?? 0;
+                return Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            CircleAvatar(child: Icon(r['type'] == 'investment' ? Icons.trending_up_rounded : Icons.repeat_rounded)),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('${r['merchant']}', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                                  const SizedBox(height: 3),
+                                  Text('${r['category']} • ${r['frequency']}', style: Theme.of(context).textTheme.bodySmall),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Flexible(
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerRight,
+                                child: Text(_money.format(r['averageAmount']), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            _InfoPill(icon: Icons.event_rounded, text: 'Next ${DateFormat('dd MMM').format(due)}'),
+                            _InfoPill(icon: Icons.history_rounded, text: '${r['occurrences']} payments'),
+                            _InfoPill(icon: Icons.verified_outlined, text: '$confidence% confidence'),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          'Detected from completed payments with an average amount variation of ${variation.toStringAsFixed(1)}%. This is a prediction, not a scheduled bank instruction.',
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      );
 }
 
 class AccountsPage extends StatefulWidget { const AccountsPage({super.key}); @override State<AccountsPage> createState()=>_AccountsPageState(); }
@@ -282,25 +364,208 @@ class _AccountsPageState extends State<AccountsPage>{
     final n=TextEditingController(text:'${a['name']}'); final b=TextEditingController(text:'${a['current_balance']}'); bool include=(a['include_net_worth'] as int)==1;
     await showDialog(context:context,builder:(c)=>StatefulBuilder(builder:(c,set)=>AlertDialog(title:const Text('Account'),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:n,decoration:const InputDecoration(labelText:'Account name')),const SizedBox(height:10),TextField(controller:b,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Current balance',prefixText:'₹ ')),SwitchListTile(contentPadding:EdgeInsets.zero,value:include,onChanged:(v)=>set(()=>include=v),title:const Text('Include in net worth'))]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Cancel')),FilledButton(onPressed:()async{await AppDb.instance.updateAccount(a['id'] as int,name:n.text,balance:double.tryParse(b.text)??0,includeNetWorth:include);if(c.mounted)Navigator.pop(c);},child:const Text('Save'))]))); if(mounted)setState((){});
   }
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Accounts')),body:FutureBuilder<List<Object>>(future:Future.wait<Object>([AppDb.instance.accounts(),AppDb.instance.spendByAccount()]),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final d=s.data![0] as List<Map<String,Object?>>;final stats=s.data![1] as Map<String,Map<String,double>>;if(d.isEmpty)return const _EmptyInfo(icon:Icons.account_balance,title:'No account hints found',text:'Account detection uses the SMS sender and last 3–4 account/card digits when banks include them.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:d.length,itemBuilder:(context,i){final a=d[i];final st=stats['${a['account_key']}']??const <String,double>{};return Card(child:ListTile(leading:const CircleAvatar(child:Icon(Icons.account_balance)),title:Text('${a['name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('Detected: ${a['sender']} ••••${a['account_hint']}\nSpent ${_money.format(st['expense']??0)} • Income ${_money.format(st['income']??0)}'),isThreeLine:true,trailing:Text(_money.format(a['current_balance'])),onTap:()=>edit(a)));});}));
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Accounts')),body:FutureBuilder<List<Object>>(future:Future.wait<Object>([AppDb.instance.accounts(),AppDb.instance.spendByAccount()]),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final d=s.data![0] as List<Map<String,Object?>>;final stats=s.data![1] as Map<String,Map<String,double>>;if(d.isEmpty)return const _EmptyInfo(icon:Icons.account_balance,title:'No account hints found',text:'Account detection uses the SMS sender and last 3–4 account/card digits when banks include them.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:d.length,itemBuilder:(context,i){final a=d[i];final st=stats['${a['account_key']}']??const <String,double>{};return Card(margin:const EdgeInsets.only(bottom:10),child:ListTile(leading:const CircleAvatar(child:Icon(Icons.account_balance)),title:Text('${a['name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('Detected: ${a['sender']} ••••${a['account_hint']}\nSpent ${_money.format(st['expense']??0)} • Income ${_money.format(st['income']??0)}'),isThreeLine:true,trailing:Text(_money.format(a['current_balance'])),onTap:()=>edit(a)));});}));
 }
 
 class MerchantAliasesPage extends StatefulWidget{const MerchantAliasesPage({super.key});@override State<MerchantAliasesPage> createState()=>_MerchantAliasesPageState();}
 class _MerchantAliasesPageState extends State<MerchantAliasesPage>{
   Future<void> add()async{final p=TextEditingController(),n=TextEditingController();await showDialog(context:context,builder:(c)=>AlertDialog(title:const Text('Merchant alias'),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:p,decoration:const InputDecoration(labelText:'Text/pattern',hintText:'zomato@icici')),const SizedBox(height:10),TextField(controller:n,decoration:const InputDecoration(labelText:'Normalize to',hintText:'Zomato'))]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Cancel')),FilledButton(onPressed:()async{if(p.text.trim().isNotEmpty&&n.text.trim().isNotEmpty){await AppDb.instance.saveMerchantAlias(p.text,n.text);if(c.mounted)Navigator.pop(c);}},child:const Text('Save'))]));if(mounted)setState((){});}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Merchant normalization'),actions:[IconButton(onPressed:add,icon:const Icon(Icons.add))]),body:FutureBuilder<List<Map<String,Object?>>>(future:AppDb.instance.merchantAliases(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final a=s.data![i];return Card(child:ListTile(title:Text('${a['normalized_name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('Contains: ${a['pattern']}'),trailing:IconButton(onPressed:()async{await AppDb.instance.deleteMerchantAlias(a['id'] as int);setState((){});},icon:const Icon(Icons.delete_outline))));});}));
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Merchant normalization'),actions:[IconButton(onPressed:add,icon:const Icon(Icons.add))]),body:FutureBuilder<List<Map<String,Object?>>>(future:AppDb.instance.merchantAliases(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final a=s.data![i];return Card(margin:const EdgeInsets.only(bottom:10),child:ListTile(title:Text('${a['normalized_name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('Contains: ${a['pattern']}'),trailing:IconButton(onPressed:()async{await AppDb.instance.deleteMerchantAlias(a['id'] as int);setState((){});},icon:const Icon(Icons.delete_outline))));});}));
 }
 
-class AdvancedSearchPage extends StatefulWidget { const AdvancedSearchPage({super.key}); @override State<AdvancedSearchPage> createState()=>_AdvancedSearchPageState(); }
-class _AdvancedSearchPageState extends State<AdvancedSearchPage>{
-  final q=TextEditingController(),min=TextEditingController(),max=TextEditingController(),account=TextEditingController(); String type='all',category='',source=''; DateTime? from,to; List<TxRecord>? results;
-  Future<void> search()async{results=await AppDb.instance.searchTransactions(query:q.text,type:type,category:category,source:source,account:account.text.trim(),minAmount:double.tryParse(min.text),maxAmount:double.tryParse(max.text),startMs:from?.millisecondsSinceEpoch,endMs:to==null?null:DateTime(to!.year,to!.month,to!.day+1).millisecondsSinceEpoch);if(mounted)setState((){});}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Advanced search')),body:FutureBuilder<List<CategoryRecord>>(future:AppDb.instance.categories(),builder:(context,s){final cats=s.data??[];return Column(children:[Padding(padding:const EdgeInsets.all(14),child:Column(children:[TextField(controller:q,decoration:const InputDecoration(prefixIcon:Icon(Icons.search),labelText:'Merchant, note, SMS text…'),onSubmitted:(_)=>search()),const SizedBox(height:8),Row(children:[Expanded(child:DropdownButtonFormField(value:type,items:['all','expense','income','investment','transfer','refund'].map((x)=>DropdownMenuItem(value:x,child:Text(x=='all'?'All types':_cap(x)))).toList(),onChanged:(v)=>setState(()=>type=v??'all'),decoration:const InputDecoration(labelText:'Type'))),const SizedBox(width:8),Expanded(child:DropdownButtonFormField(value:category,items:[const DropdownMenuItem(value:'',child:Text('Any category')),...cats.map((c)=>DropdownMenuItem(value:c.name,child:Text(c.name,overflow:TextOverflow.ellipsis)))],onChanged:(v)=>setState(()=>category=v??''),decoration:const InputDecoration(labelText:'Category')))]),const SizedBox(height:8),Row(children:[Expanded(child:TextField(controller:min,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Min amount'))),const SizedBox(width:8),Expanded(child:TextField(controller:max,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Max amount'))),const SizedBox(width:8),Expanded(child:DropdownButtonFormField(value:source,items:const [DropdownMenuItem(value:'',child:Text('Any source')),DropdownMenuItem(value:'sms',child:Text('SMS')),DropdownMenuItem(value:'phonepe_notification',child:Text('PhonePe')),DropdownMenuItem(value:'upi_intent',child:Text('UPI')),DropdownMenuItem(value:'manual',child:Text('Manual')),DropdownMenuItem(value:'receipt_ocr',child:Text('Receipt'))],onChanged:(v)=>setState(()=>source=v??''),decoration:const InputDecoration(labelText:'Source')))]),const SizedBox(height:8),TextField(controller:account,decoration:const InputDecoration(labelText:'Account hint / sender',prefixIcon:Icon(Icons.account_balance_outlined))),const SizedBox(height:8),Row(children:[Expanded(child:OutlinedButton.icon(onPressed:()async{final d=await showDatePicker(context:context,initialDate:from??DateTime.now(),firstDate:DateTime(2015),lastDate:DateTime.now());if(d!=null)setState(()=>from=d);},icon:const Icon(Icons.date_range),label:Text(from==null?'From date':DateFormat('dd MMM yy').format(from!)))),const SizedBox(width:8),Expanded(child:OutlinedButton.icon(onPressed:()async{final d=await showDatePicker(context:context,initialDate:to??DateTime.now(),firstDate:DateTime(2015),lastDate:DateTime.now());if(d!=null)setState(()=>to=d);},icon:const Icon(Icons.event),label:Text(to==null?'To date':DateFormat('dd MMM yy').format(to!))))]),const SizedBox(height:10),SizedBox(width:double.infinity,child:FilledButton.icon(onPressed:search,icon:const Icon(Icons.manage_search),label:const Text('Search')))])),Expanded(child:results==null?const _EmptyInfo(icon:Icons.manage_search,title:'Search transactions',text:'Combine merchant text, amount, category, type and source filters.'):results!.isEmpty?const Center(child:Text('No matches')):ListView.builder(padding:const EdgeInsets.fromLTRB(14,0,14,100),itemCount:results!.length,itemBuilder:(context,i)=>_TxMiniTile(tx:results![i]))) ]); }));
+class AdvancedSearchPage extends StatefulWidget {
+  const AdvancedSearchPage({super.key});
+  @override
+  State<AdvancedSearchPage> createState() => _AdvancedSearchPageState();
 }
 
-class CashFlowPage extends StatelessWidget { const CashFlowPage({super.key}); @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Cash flow')),body:FutureBuilder<Map<String,double>>(future:AppDb.instance.cashFlowSummary(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final x=s.data!;return ListView(padding:const EdgeInsets.all(16),children:[_MetricCard('Net cash flow',_money.format(x['net']),Icons.account_balance_wallet_rounded),Row(children:[Expanded(child:_MetricCard('Income',_money.format(x['income']),Icons.south_west_rounded)),const SizedBox(width:10),Expanded(child:_MetricCard('Expense',_money.format(x['expense']),Icons.north_east_rounded))]),Row(children:[Expanded(child:_MetricCard('Daily average',_money.format(x['dailyAverage']),Icons.today_rounded)),const SizedBox(width:10),Expanded(child:_MetricCard('Projected month',_money.format(x['projectedExpense']),Icons.trending_up_rounded))]),_MetricCard('Savings rate','${(x['savingsRate']??0).toStringAsFixed(1)}%',Icons.savings_rounded)]); })); }
+class _AdvancedSearchPageState extends State<AdvancedSearchPage> {
+  final q = TextEditingController();
+  final min = TextEditingController();
+  final max = TextEditingController();
+  final account = TextEditingController();
+  String type = 'all';
+  String category = '';
+  String source = '';
+  DateTime? from, to;
+  List<TxRecord>? results;
+  bool busy = false;
 
-class SmartInsightsPage extends StatelessWidget { const SmartInsightsPage({super.key}); @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Smart insights')),body:FutureBuilder<List<Map<String,Object?>>>(future:AppDb.instance.smartInsights(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const _EmptyInfo(icon:Icons.check_circle_outline,title:'Nothing unusual detected',text:'Insights will appear when spending deviates from your recent pattern or a budget is projected to exceed.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final x=s.data![i];return Card(child:ListTile(leading:CircleAvatar(child:Icon(x['kind']=='forecast'?Icons.speed:x['kind']=='recurring'?Icons.autorenew:Icons.insights)),title:Text('${x['title']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('${x['message']}')));});})); }
+  @override
+  void dispose() {
+    q.dispose();
+    min.dispose();
+    max.dispose();
+    account.dispose();
+    super.dispose();
+  }
+
+  Future<void> search() async {
+    FocusScope.of(context).unfocus();
+    setState(() => busy = true);
+    try {
+      final found = await AppDb.instance.searchTransactions(
+        query: q.text,
+        type: type,
+        category: category,
+        source: source,
+        account: account.text.trim(),
+        minAmount: double.tryParse(min.text.replaceAll(',', '')),
+        maxAmount: double.tryParse(max.text.replaceAll(',', '')),
+        startMs: from?.millisecondsSinceEpoch,
+        endMs: to == null ? null : DateTime(to!.year, to!.month, to!.day + 1).millisecondsSinceEpoch,
+        limit: 300,
+      );
+      if (mounted) setState(() => results = found);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  void clear() {
+    q.clear(); min.clear(); max.clear(); account.clear();
+    setState(() { type = 'all'; category = ''; source = ''; from = null; to = null; results = null; });
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(
+          title: const Text('Advanced search'),
+          actions: [IconButton(tooltip: 'Clear filters', onPressed: clear, icon: const Icon(Icons.refresh_rounded))],
+        ),
+        body: FutureBuilder<List<CategoryRecord>>(
+          future: AppDb.instance.categories(),
+          builder: (context, snap) {
+            final cats = snap.data ?? const <CategoryRecord>[];
+            return CustomScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                  sliver: SliverToBoxAdapter(
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            TextField(
+                              controller: q,
+                              decoration: const InputDecoration(prefixIcon: Icon(Icons.search), labelText: 'Merchant, note, SMS text…'),
+                              textInputAction: TextInputAction.search,
+                              onSubmitted: (_) => search(),
+                            ),
+                            const SizedBox(height: 12),
+                            LayoutBuilder(
+                              builder: (context, c) {
+                                final wide = c.maxWidth >= 520;
+                                final width = wide ? (c.maxWidth - 12) / 2 : c.maxWidth;
+                                return Wrap(
+                                  spacing: 12, runSpacing: 12,
+                                  children: [
+                                    SizedBox(width: width, child: DropdownButtonFormField<String>(value: type, isExpanded: true, items: ['all','expense','income','investment','transfer','refund'].map((x) => DropdownMenuItem(value: x, child: Text(x == 'all' ? 'All types' : _cap(x), overflow: TextOverflow.ellipsis))).toList(), onChanged: (v) => setState(() => type = v ?? 'all'), decoration: const InputDecoration(labelText: 'Type'))),
+                                    SizedBox(width: width, child: DropdownButtonFormField<String>(value: category, isExpanded: true, items: [const DropdownMenuItem(value: '', child: Text('Any category')),...cats.map((c) => DropdownMenuItem(value: c.name, child: Text(c.name, overflow: TextOverflow.ellipsis)))], onChanged: (v) => setState(() => category = v ?? ''), decoration: const InputDecoration(labelText: 'Category'))),
+                                    SizedBox(width: width, child: TextField(controller: min, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Min amount', prefixText: '₹ '))),
+                                    SizedBox(width: width, child: TextField(controller: max, keyboardType: const TextInputType.numberWithOptions(decimal: true), decoration: const InputDecoration(labelText: 'Max amount', prefixText: '₹ '))),
+                                    SizedBox(width: width, child: DropdownButtonFormField<String>(value: source, isExpanded: true, items: const [DropdownMenuItem(value: '', child: Text('Any source')),DropdownMenuItem(value: 'sms', child: Text('SMS')),DropdownMenuItem(value: 'phonepe_notification', child: Text('PhonePe')),DropdownMenuItem(value: 'upi_intent', child: Text('UPI')),DropdownMenuItem(value: 'manual', child: Text('Manual')),DropdownMenuItem(value: 'receipt_ocr', child: Text('Receipt'))], onChanged: (v) => setState(() => source = v ?? ''), decoration: const InputDecoration(labelText: 'Source'))),
+                                    SizedBox(width: width, child: TextField(controller: account, decoration: const InputDecoration(labelText: 'Account hint / sender', prefixIcon: Icon(Icons.account_balance_outlined)))),
+                                  ],
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              children: [
+                                Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await showDatePicker(context: context, initialDate: from ?? DateTime.now(), firstDate: DateTime(2015), lastDate: DateTime.now()); if (d != null) setState(() => from = d); }, icon: const Icon(Icons.date_range), label: FittedBox(fit: BoxFit.scaleDown, child: Text(from == null ? 'From date' : DateFormat('dd MMM yy').format(from!))))),
+                                const SizedBox(width: 10),
+                                Expanded(child: OutlinedButton.icon(onPressed: () async { final d = await showDatePicker(context: context, initialDate: to ?? DateTime.now(), firstDate: DateTime(2015), lastDate: DateTime.now()); if (d != null) setState(() => to = d); }, icon: const Icon(Icons.event), label: FittedBox(fit: BoxFit.scaleDown, child: Text(to == null ? 'To date' : DateFormat('dd MMM yy').format(to!))))),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            FilledButton.icon(
+                              onPressed: busy ? null : search,
+                              icon: busy ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.manage_search),
+                              label: Text(busy ? 'Searching…' : 'Search'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                if (results == null)
+                  const SliverFillRemaining(hasScrollBody: false, child: _EmptyInfo(icon: Icons.manage_search, title: 'Search transactions', text: 'Combine merchant text, amount, category, type, source, account and date filters.'))
+                else if (results!.isEmpty)
+                  const SliverFillRemaining(hasScrollBody: false, child: Center(child: Text('No matches')))
+                else ...[
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+                    sliver: SliverToBoxAdapter(child: Text('${results!.length} result${results!.length == 1 ? '' : 's'}', style: const TextStyle(fontWeight: FontWeight.w800))),
+                  ),
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 30),
+                    sliver: SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                        (context, i) => Padding(
+                          padding: const EdgeInsets.only(bottom: 10),
+                          child: _TxMiniTile(tx: results![i]),
+                        ),
+                        childCount: results!.length,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      );
+}
+
+class CashFlowPage extends StatelessWidget {
+  const CashFlowPage({super.key});
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Cash flow')),
+        body: FutureBuilder<Map<String, double>>(
+          future: AppDb.instance.cashFlowSummary(),
+          builder: (context, snap) {
+            if (snap.hasError) return _EmptyInfo(icon: Icons.error_outline, title: 'Could not calculate cash flow', text: '${snap.error}');
+            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+            final x = snap.data!;
+            final monthLabel = DateFormat('MMMM yyyy').format(DateTime.now());
+            return ListView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              children: [
+                Text(monthLabel, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
+                const SizedBox(height: 4),
+                Text('Transfers are excluded. Investments are shown separately from everyday expenses.', style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4)),
+                const SizedBox(height: 14),
+                _MetricCard('Net cash flow', _money.format(x['net']), Icons.account_balance_wallet_rounded, emphasized: true),
+                const SizedBox(height: 2),
+                _MetricGrid(
+                  children: [
+                    _MetricCard('Money in', _money.format(x['inflow']), Icons.south_west_rounded, subtitle: 'Income + refunds'),
+                    _MetricCard('Money out', _money.format(x['outflow']), Icons.north_east_rounded, subtitle: 'Expenses + investments'),
+                    _MetricCard('Income', _money.format(x['income']), Icons.payments_outlined),
+                    _MetricCard('Refunds', _money.format(x['refund']), Icons.replay_rounded),
+                    _MetricCard('Expenses', _money.format(x['expense']), Icons.shopping_bag_outlined),
+                    _MetricCard('Investments', _money.format(x['investment']), Icons.trending_up_rounded),
+                    _MetricCard('Daily expense avg.', _money.format(x['dailyAverage']), Icons.today_rounded),
+                    _MetricCard('Projected expense', _money.format(x['projectedExpense']), Icons.show_chart_rounded),
+                  ],
+                ),
+                _MetricCard('Savings rate', '${(x['savingsRate'] ?? 0).toStringAsFixed(1)}%', Icons.savings_rounded, subtitle: 'Based on income vs net everyday expenses'),
+              ],
+            );
+          },
+        ),
+      );
+}
+
+class SmartInsightsPage extends StatelessWidget { const SmartInsightsPage({super.key}); @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Smart insights')),body:FutureBuilder<List<Map<String,Object?>>>(future:AppDb.instance.smartInsights(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const _EmptyInfo(icon:Icons.check_circle_outline,title:'Nothing unusual detected',text:'Insights will appear when spending deviates from your recent pattern or a budget is projected to exceed.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final x=s.data![i];return Card(margin:const EdgeInsets.only(bottom:10),child:ListTile(leading:CircleAvatar(child:Icon(x['kind']=='forecast'?Icons.speed:x['kind']=='recurring'?Icons.autorenew:Icons.insights)),title:Text('${x['title']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('${x['message']}')));});})); }
 
 class ReceiptImportPage extends StatefulWidget {
   const ReceiptImportPage({super.key});
@@ -714,7 +979,7 @@ class _ExportBackupPageState extends State<ExportBackupPage> {
 class ReviewQueuePage extends StatefulWidget{const ReviewQueuePage({super.key});@override State<ReviewQueuePage> createState()=>_ReviewQueuePageState();}
 class _ReviewQueuePageState extends State<ReviewQueuePage>{
   Future<void> act(TxRecord t,bool accept)async{if(t.id==null)return;if(accept)await AppDb.instance.acceptReview(t.id!);else await AppDb.instance.ignoreReview(t.id!);setState((){});}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Needs review')),body:FutureBuilder<List<TxRecord>>(future:AppDb.instance.reviewTransactions(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const _EmptyInfo(icon:Icons.task_alt,title:'Review queue is clear',text:'Low-confidence ML detections will appear here instead of being silently added or discarded.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final t=s.data![i];return Card(child:Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t.merchant,style:const TextStyle(fontWeight:FontWeight.w900,fontSize:17)),Text('${_money.format(t.amount)} • ${t.type} • ${(t.classificationConfidence*100).round()}% confidence'),if(t.rawMessage.isNotEmpty)...[const SizedBox(height:8),Text(t.rawMessage,maxLines:4,overflow:TextOverflow.ellipsis)],const SizedBox(height:10),Row(children:[Expanded(child:OutlinedButton(onPressed:()=>act(t,false),child:const Text('Ignore'))),const SizedBox(width:8),Expanded(child:FilledButton(onPressed:()=>act(t,true),child:const Text('Accept')))])])));});}));
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Needs review')),body:FutureBuilder<List<TxRecord>>(future:AppDb.instance.reviewTransactions(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const _EmptyInfo(icon:Icons.task_alt,title:'Review queue is clear',text:'Low-confidence ML detections will appear here instead of being silently added or discarded.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final t=s.data![i];return Card(margin:const EdgeInsets.only(bottom:10),child:Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t.merchant,style:const TextStyle(fontWeight:FontWeight.w900,fontSize:17)),Text('${_money.format(t.amount)} • ${t.type} • ${(t.classificationConfidence*100).round()}% confidence'),if(t.rawMessage.isNotEmpty)...[const SizedBox(height:8),Text(t.rawMessage,maxLines:4,overflow:TextOverflow.ellipsis)],const SizedBox(height:10),Row(children:[Expanded(child:OutlinedButton(onPressed:()=>act(t,false),child:const Text('Ignore'))),const SizedBox(width:8),Expanded(child:FilledButton(onPressed:()=>act(t,true),child:const Text('Accept')))])])));});}));
 }
 
 class ModelFeedbackPage extends StatelessWidget{const ModelFeedbackPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('ML feedback')),body:FutureBuilder<Map<String,int>>(future:AppDb.instance.modelFeedbackStats(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final x=s.data!;final auto=x['auto']??0, corrected=x['corrected']??0;final acceptance=auto==0?0.0:((auto-corrected)/auto*100).clamp(0,100).toDouble();return ListView(padding:const EdgeInsets.all(16),children:[_MetricCard('Estimated accepted without correction','${acceptance.toStringAsFixed(1)}%',Icons.psychology),_MetricCard('Auto-classified','$auto',Icons.auto_awesome),_MetricCard('User corrections','$corrected',Icons.edit_note),_MetricCard('Review accepted','${x['accepted']??0}',Icons.check_circle),_MetricCard('Review ignored','${x['ignored']??0}',Icons.block),_MetricCard('Pending review','${x['pending']??0}',Icons.pending_actions),const Padding(padding:EdgeInsets.all(8),child:Text('These are local product-quality signals, not a formal benchmark accuracy score.',style:TextStyle(fontSize:12))) ]); }));}
@@ -722,11 +987,76 @@ class ModelFeedbackPage extends StatelessWidget{const ModelFeedbackPage({super.k
 class NetWorthPage extends StatefulWidget{const NetWorthPage({super.key});@override State<NetWorthPage> createState()=>_NetWorthPageState();}
 class _NetWorthPageState extends State<NetWorthPage>{
   Future<void> add([Map<String,Object?>? item])async{final n=TextEditingController(text:item?['name']?.toString()??'');final b=TextEditingController(text:item?['balance']?.toString()??'');String type=item?['item_type']?.toString()??'asset';final cat=TextEditingController(text:item?['category']?.toString()??'');await showDialog(context:context,builder:(c)=>StatefulBuilder(builder:(c,set)=>AlertDialog(title:Text(item==null?'Add net-worth item':'Edit item'),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:n,decoration:const InputDecoration(labelText:'Name')),const SizedBox(height:8),DropdownButtonFormField(value:type,items:const [DropdownMenuItem(value:'asset',child:Text('Asset')),DropdownMenuItem(value:'liability',child:Text('Liability'))],onChanged:(v)=>set(()=>type=v??type),decoration:const InputDecoration(labelText:'Type')),const SizedBox(height:8),TextField(controller:cat,decoration:const InputDecoration(labelText:'Category')),const SizedBox(height:8),TextField(controller:b,keyboardType:TextInputType.number,decoration:const InputDecoration(labelText:'Balance',prefixText:'₹ '))]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Cancel')),FilledButton(onPressed:()async{await AppDb.instance.saveNetWorthItem(id: item == null ? null : item['id'] as int, name:n.text,itemType:type,category:cat.text,balance:double.tryParse(b.text)??0);if(c.mounted)Navigator.pop(c);},child:const Text('Save'))])));if(mounted)setState((){});}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Net worth'),actions:[IconButton(onPressed:()=>add(),icon:const Icon(Icons.add))]),body:FutureBuilder<List<Object>>(future:Future.wait<Object>([AppDb.instance.netWorthSummary(),AppDb.instance.netWorthItems()]),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final sum=s.data![0] as Map<String,double>;final items=s.data![1] as List<Map<String,Object?>>;return ListView(padding:const EdgeInsets.all(16),children:[_MetricCard('Net worth',_money.format(sum['netWorth']),Icons.account_balance_wallet),Row(children:[Expanded(child:_MetricCard('Assets',_money.format(sum['assets']),Icons.add_circle_outline)),const SizedBox(width:8),Expanded(child:_MetricCard('Liabilities',_money.format(sum['liabilities']),Icons.remove_circle_outline))]),const SizedBox(height:8),...items.map((x)=>Card(child:ListTile(title:Text('${x['name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('${_cap('${x['item_type']}')} • ${x['category']}'),trailing:Text(_money.format(x['balance'])),onTap:()=>add(x),onLongPress:()async{await AppDb.instance.deleteNetWorthItem(x['id'] as int);setState((){});}))) ]); }));}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Net worth'),actions:[IconButton(onPressed:()=>add(),icon:const Icon(Icons.add))]),body:FutureBuilder<List<Object>>(future:Future.wait<Object>([AppDb.instance.netWorthSummary(),AppDb.instance.netWorthItems()]),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final sum=s.data![0] as Map<String,double>;final items=s.data![1] as List<Map<String,Object?>>;return ListView(padding:const EdgeInsets.all(16),children:[const _SimpleNotice(text:'Net worth is optional and manual. SMS-detected bank/card hints are not treated as balances.'),const SizedBox(height:12),_MetricCard('Net worth',_money.format(sum['netWorth']),Icons.account_balance_wallet),Row(children:[Expanded(child:_MetricCard('Assets',_money.format(sum['assets']),Icons.add_circle_outline)),const SizedBox(width:8),Expanded(child:_MetricCard('Liabilities',_money.format(sum['liabilities']),Icons.remove_circle_outline))]),const SizedBox(height:8),...items.map((x)=>Card(margin:const EdgeInsets.only(bottom:10),child:ListTile(title:Text('${x['name']}',style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text('${_cap('${x['item_type']}')} • ${x['category']}'),trailing:Text(_money.format(x['balance'])),onTap:()=>add(x),onLongPress:()async{await AppDb.instance.deleteNetWorthItem(x['id'] as int);setState((){});}))) ]); }));}
 
-class PrivacyAppearancePage extends StatefulWidget{const PrivacyAppearancePage({super.key});@override State<PrivacyAppearancePage> createState()=>_PrivacyAppearancePageState();}
-class _PrivacyAppearancePageState extends State<PrivacyAppearancePage>{bool loading=true,lock=false,secure=true,dark=false;@override void initState(){super.initState();load();}Future<void>load()async{lock=await AppDb.instance.getBoolSetting('privacy_lock_enabled');secure=await AppDb.instance.getBoolSetting('secure_screen_enabled',fallback:true);dark=await AppDb.instance.getBoolSetting('dark_mode');if(mounted)setState(()=>loading=false);}Future<void>setv(String k,bool v)async{await AppDb.instance.setSetting(k,v?'1':'0');if(k=='dark_mode')expenseThemeMode.value=v?ThemeMode.dark:ThemeMode.light;if(k=='secure_screen_enabled')await NativeBridge.setSecureScreen(v);}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Privacy & appearance')),body:loading?const Center(child:CircularProgressIndicator()):ListView(children:[SwitchListTile(value:lock,onChanged:(v){setState(()=>lock=v);setv('privacy_lock_enabled',v);},secondary:const Icon(Icons.fingerprint),title:const Text('Biometric/device lock'),subtitle:const Text('Require local authentication when opening the app.')),SwitchListTile(value:secure,onChanged:(v){setState(()=>secure=v);setv('secure_screen_enabled',v);},secondary:const Icon(Icons.visibility_off),title:const Text('Hide recent-app preview'),subtitle:const Text('Uses Android FLAG_SECURE to protect sensitive amounts and screens.')),SwitchListTile(value:dark,onChanged:(v){setState(()=>dark=v);setv('dark_mode',v);},secondary:const Icon(Icons.dark_mode),title:const Text('Dark mode')),const ListTile(leading:Icon(Icons.cloud_off),title:Text('Local-first privacy'),subtitle:Text('SMS, notification text, receipts, ML decisions and backups stay on device unless you explicitly share/export them.'))]));}
+class PrivacyAppearancePage extends StatefulWidget {
+  const PrivacyAppearancePage({super.key});
+  @override
+  State<PrivacyAppearancePage> createState() => _PrivacyAppearancePageState();
+}
+
+class _PrivacyAppearancePageState extends State<PrivacyAppearancePage> {
+  bool loading = true;
+  bool lock = false;
+  bool dark = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    lock = await AppDb.instance.getBoolSetting('privacy_lock_enabled');
+    dark = await AppDb.instance.getBoolSetting('dark_mode');
+    await AppDb.instance.setSetting('secure_screen_enabled', '0');
+    try { await NativeBridge.setSecureScreen(false); } catch (_) {}
+    if (mounted) setState(() => loading = false);
+  }
+
+  Future<void> _set(String key, bool value) async {
+    await AppDb.instance.setSetting(key, value ? '1' : '0');
+    if (key == 'dark_mode') {
+      expenseThemeMode.value = value ? ThemeMode.dark : ThemeMode.light;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Privacy & appearance')),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                children: [
+                  SwitchListTile(
+                    value: lock,
+                    onChanged: (v) { setState(() => lock = v); _set('privacy_lock_enabled', v); },
+                    secondary: const Icon(Icons.fingerprint),
+                    title: const Text('Biometric/device lock'),
+                    subtitle: const Text('Require local authentication when opening the app.'),
+                  ),
+                  SwitchListTile(
+                    value: dark,
+                    onChanged: (v) { setState(() => dark = v); _set('dark_mode', v); },
+                    secondary: const Icon(Icons.dark_mode),
+                    title: const Text('Dark mode'),
+                  ),
+                  const ListTile(
+                    leading: Icon(Icons.photo_camera_outlined),
+                    title: Text('Screenshots enabled'),
+                    subtitle: Text('Screen capture protection is temporarily disabled so UI issues can be reported with screenshots.'),
+                  ),
+                  const ListTile(
+                    leading: Icon(Icons.cloud_off),
+                    title: Text('Local-first privacy'),
+                    subtitle: Text('SMS, notification text, receipts, ML decisions and backups stay on device unless you explicitly share/export them.'),
+                  ),
+                ],
+              ),
+      );
+}
 
 class HomeWidgetPage extends StatefulWidget{const HomeWidgetPage({super.key});@override State<HomeWidgetPage> createState()=>_HomeWidgetPageState();}
 class _HomeWidgetPageState extends State<HomeWidgetPage>{String status='';Future<void>refresh()async{try{await NativeBridge.updateHomeWidget();setState(()=>status='Widget refreshed. Add “Expense Tracker” from your Android home-screen widget picker if it is not already placed.');}catch(e){setState(()=>status='Could not refresh widget: $e');}}
@@ -738,7 +1068,7 @@ class SplitTransactionPage extends StatefulWidget{
   @override State<SplitTransactionPage> createState()=>_SplitTransactionPageState();
 }
 class _SplitTransactionPageState extends State<SplitTransactionPage>{final rows=<Map<String,dynamic>>[];List<CategoryRecord>cats=[];@override void initState(){super.initState();load();}Future<void>load()async{cats=await AppDb.instance.expenseCategories();final existing=await AppDb.instance.splitsFor(widget.transaction.id!);if(existing.isNotEmpty)rows.addAll(existing.map((e)=>{'category':e['category'],'amount':(e['amount']as num).toDouble(),'note':e['note']??''}));else rows.add({'category':widget.transaction.category,'amount':widget.transaction.amount,'note':''});if(mounted)setState((){});}double get total=>rows.fold(0,(a,b)=>a+(b['amount']as double));Future<void>save()async{if((total-widget.transaction.amount).abs()>0.01){ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Split amounts must equal the transaction amount.')));return;}await AppDb.instance.setSplits(widget.transaction.id!,rows.map((x)=><String,Object?>{'category':x['category'],'amount':x['amount'],'note':x['note']}).toList());if(mounted)Navigator.pop(context,true);}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Split transaction')),body:ListView(padding:const EdgeInsets.all(16),children:[Text('${widget.transaction.merchant} • ${_money.format(widget.transaction.amount)}',style:const TextStyle(fontSize:18,fontWeight:FontWeight.w900)),const SizedBox(height:12),...rows.asMap().entries.map((e){final i=e.key,r=e.value;return Card(child:Padding(padding:const EdgeInsets.all(12),child:Row(children:[Expanded(child:DropdownButtonFormField(value:r['category'] as String,items:cats.map((c)=>DropdownMenuItem(value:c.name,child:Text(c.name))).toList(),onChanged:(v)=>setState(()=>r['category']=v),decoration:const InputDecoration(labelText:'Category'))),const SizedBox(width:8),SizedBox(width:110,child:TextFormField(initialValue:(r['amount']as double).toStringAsFixed(2),keyboardType:TextInputType.number,onChanged:(v)=>r['amount']=double.tryParse(v)??0,decoration:const InputDecoration(labelText:'Amount'))),IconButton(onPressed:rows.length<=1?null:()=>setState(()=>rows.removeAt(i)),icon:const Icon(Icons.close))])));}),OutlinedButton.icon(onPressed:()=>setState(()=>rows.add({'category':cats.isEmpty?'Uncategorized':cats.first.name,'amount':0.0,'note':''})),icon:const Icon(Icons.add),label:const Text('Add split')),const SizedBox(height:8),Text('Split total: ${_money.format(total)} / ${_money.format(widget.transaction.amount)}',style:TextStyle(fontWeight:FontWeight.w800,color:(total-widget.transaction.amount).abs()<=0.01?Colors.green:Colors.red)),const SizedBox(height:12),FilledButton(onPressed:save,child:const Text('Save split'))]));}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Split transaction')),body:ListView(padding:const EdgeInsets.all(16),children:[Text('${widget.transaction.merchant} • ${_money.format(widget.transaction.amount)}',style:const TextStyle(fontSize:18,fontWeight:FontWeight.w900)),const SizedBox(height:12),...rows.asMap().entries.map((e){final i=e.key,r=e.value;return Card(margin:const EdgeInsets.only(bottom:10),child:Padding(padding:const EdgeInsets.all(12),child:Row(children:[Expanded(child:DropdownButtonFormField(value:r['category'] as String,items:cats.map((c)=>DropdownMenuItem(value:c.name,child:Text(c.name))).toList(),onChanged:(v)=>setState(()=>r['category']=v),decoration:const InputDecoration(labelText:'Category'))),const SizedBox(width:8),SizedBox(width:110,child:TextFormField(initialValue:(r['amount']as double).toStringAsFixed(2),keyboardType:TextInputType.number,onChanged:(v)=>r['amount']=double.tryParse(v)??0,decoration:const InputDecoration(labelText:'Amount'))),IconButton(onPressed:rows.length<=1?null:()=>setState(()=>rows.removeAt(i)),icon:const Icon(Icons.close))])));}),OutlinedButton.icon(onPressed:()=>setState(()=>rows.add({'category':cats.isEmpty?'Uncategorized':cats.first.name,'amount':0.0,'note':''})),icon:const Icon(Icons.add),label:const Text('Add split')),const SizedBox(height:8),Text('Split total: ${_money.format(total)} / ${_money.format(widget.transaction.amount)}',style:TextStyle(fontWeight:FontWeight.w800,color:(total-widget.transaction.amount).abs()<=0.01?Colors.green:Colors.red)),const SizedBox(height:12),FilledButton(onPressed:save,child:const Text('Save split'))]));}
 
 class _TxMiniTile extends StatelessWidget {
   final TxRecord tx;
@@ -800,8 +1130,114 @@ class _TxMiniTile extends StatelessWidget {
       );
 }
 
-class _MetricCard extends StatelessWidget{final String label,value;final IconData icon;const _MetricCard(this.label,this.value,this.icon);@override Widget build(BuildContext context)=>Card(margin:const EdgeInsets.only(bottom:10),child:Padding(padding:const EdgeInsets.all(16),child:Row(children:[CircleAvatar(child:Icon(icon)),const SizedBox(width:12),Expanded(child:Text(label,style:const TextStyle(fontWeight:FontWeight.w700))),Text(value,style:const TextStyle(fontSize:18,fontWeight:FontWeight.w900))])));}
-class _ToolTile extends StatelessWidget{final IconData icon;final String title,subtitle;final VoidCallback onTap;const _ToolTile({required this.icon,required this.title,required this.subtitle,required this.onTap});@override Widget build(BuildContext context)=>Card(child:ListTile(leading:CircleAvatar(child:Icon(icon)),title:Text(title,style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text(subtitle),trailing:const Icon(Icons.chevron_right),onTap:onTap));}
+class _MetricCard extends StatelessWidget {
+  final String label, value;
+  final IconData icon;
+  final String? subtitle;
+  final bool emphasized;
+  const _MetricCard(this.label, this.value, this.icon, {this.subtitle, this.emphasized = false});
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        child: Padding(
+          padding: EdgeInsets.all(emphasized ? 18 : 16),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              CircleAvatar(radius: emphasized ? 23 : 20, child: Icon(icon)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
+                    if (subtitle != null) ...[
+                      const SizedBox(height: 2),
+                      Text(subtitle!, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
+                    ],
+                    const SizedBox(height: 5),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          value,
+                          maxLines: 1,
+                          style: TextStyle(fontSize: emphasized ? 24 : 20, fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
+class _MetricGrid extends StatelessWidget {
+  final List<Widget> children;
+  const _MetricGrid({required this.children});
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+        builder: (context, c) {
+          final columns = c.maxWidth >= 520 ? 2 : 1;
+          final width = columns == 2 ? (c.maxWidth - 10) / 2 : c.maxWidth;
+          return Wrap(
+            spacing: 10,
+            runSpacing: 0,
+            children: children.map((child) => SizedBox(width: width, child: child)).toList(),
+          );
+        },
+      );
+}
+
+class _InfoPill extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  const _InfoPill({required this.icon, required this.text});
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .45),
+          borderRadius: BorderRadius.circular(99),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [Icon(icon, size: 15), const SizedBox(width: 5), Text(text, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700))],
+        ),
+      );
+}
+
+class _ToolTile extends StatelessWidget{final IconData icon;final String title,subtitle;final VoidCallback onTap;const _ToolTile({required this.icon,required this.title,required this.subtitle,required this.onTap});@override Widget build(BuildContext context)=>Card(margin:const EdgeInsets.only(bottom:10),child:ListTile(leading:CircleAvatar(child:Icon(icon)),title:Text(title,style:const TextStyle(fontWeight:FontWeight.w800)),subtitle:Text(subtitle),trailing:const Icon(Icons.chevron_right),onTap:onTap));}
+
+class _SimpleNotice extends StatelessWidget {
+  final String text;
+  const _SimpleNotice({required this.text});
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .45),
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.info_outline_rounded, size: 20),
+            const SizedBox(width: 10),
+            Expanded(child: Text(text, style: const TextStyle(height: 1.4))),
+          ],
+        ),
+      );
+}
+
+
 class _EmptyInfo extends StatelessWidget{final IconData icon;final String title,text;const _EmptyInfo({required this.icon,required this.title,required this.text});@override Widget build(BuildContext context)=>Center(child:Padding(padding:const EdgeInsets.all(28),child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(icon,size:54,color:Theme.of(context).colorScheme.primary),const SizedBox(height:14),Text(title,textAlign:TextAlign.center,style:const TextStyle(fontSize:20,fontWeight:FontWeight.w900)),const SizedBox(height:7),Text(text,textAlign:TextAlign.center,style:const TextStyle(height:1.4))])));}
 String _cap(String x)=>x.isEmpty?x:x[0].toUpperCase()+x.substring(1);
 

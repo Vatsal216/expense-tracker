@@ -1,3 +1,14 @@
+# v16 Simplified Navigation
+
+This release keeps all underlying finance features while simplifying where they appear:
+- Removed the user-facing Accounts entry from More tools. Detected account hints remain internal for transfer matching/dedup only.
+- Moved Recurring payments to the Home screen with a compact upcoming-payments preview and View all.
+- Removed the duplicate Recurring entry from More tools.
+- Renamed Smart Finance Hub to More tools.
+- Home no longer duplicates the More tools launcher.
+- Net Worth is optional/manual only; SMS-detected account hints do not silently contribute balances.
+- Existing v15 stability/UI fixes and v14 classifier fixes remain included.
+
 # Expense Tracker — Smart Finance Edition
 
 Local-first Flutter Android personal-finance app. Transactions are detected from incoming bank/payment SMS and supported payment notifications, classified on-device, deduplicated, and stored in SQLite. No backend is required.
@@ -8,7 +19,7 @@ Local-first Flutter Android personal-finance app. Transactions are detected from
 - Optional historical SMS import after explicit `READ_SMS` permission
 - PhonePe notification tracking after explicit Notification Access permission
 - Manual transactions
-- UPI payments with notes saved locally before opening the UPI app
+- UPI payments with notes saved locally before opening the UPI app chooser (Google Pay, PhonePe, Paytm or any compatible installed app)
 - UPI QR scanner with review-before-pay flow
 - Full raw SMS/notification text available from transaction details
 - Local SQLite database and local-only classification
@@ -36,7 +47,8 @@ Manual corrections create local merchant overrides and feedback records. The ML 
 - Split transactions across categories
 - Needs Review queue for uncertain ML classifications
 - Budget forecasting and recurring-payment insights
-- Biometric/device lock and Android secure-screen protection
+- Biometric/device lock
+- Screenshots enabled during the current UI QA/stability cycle
 - Light/dark mode
 - Android home-screen spending widget
 - Notification actions: Food, Shopping, Transfer, Ignore
@@ -89,3 +101,18 @@ The workflow creates a fresh Android Flutter shell, restores this project's `lib
 - Generic refund wording no longer wins by itself; a refund now requires completed refund/credit-back language.
 - Upgrade cleanup key is bumped to v14 so previously imported SMS records are automatically reclassified with these rules.
 - Exact regression examples are stored in `tools/classifier_regression_cases.json` and added to ML training samples.
+
+## v15 stability / UI cleanup
+
+- Screenshot blocking is disabled and any previous persisted secure-screen preference is cleared so UI issues can be captured.
+- Dashboard now has Total / Month / Week / Day filters. Monthly budget progress appears only in the monthly view.
+- UPI payment always opens Android's compatible-app chooser instead of preferring PhonePe.
+- Cash Flow was redesigned to avoid overflow, show transparent Money In/Money Out components, exclude transfers, and separate investments from everyday spending.
+- Savings rate now uses income versus net everyday expenses; investments are treated as a savings allocation rather than ordinary spending.
+- Advanced Search now uses one scroll surface, responsive fields, keyboard-dismiss-on-scroll, a loading state, and spaced result cards.
+- Recurring-payment detection is stricter: normally 3+ completed payments, stable supported intervals, amount consistency, confidence scoring, and explicit recurring hints for limited 2-payment cases.
+- Recurring cards explain confidence, amount variation, frequency and next expected date.
+- Smart Finance list/detail cards have consistent spacing.
+- Main navigation no longer draws page content underneath the bottom navigation bar.
+- Large dashboard/cash-flow figures scale down instead of truncating or overflowing.
+- A v15 stored-SMS reclassification pass runs once after upgrade.

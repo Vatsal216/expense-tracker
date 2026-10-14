@@ -20,11 +20,11 @@ void main() {
 Future<void> _initializeServices() async {
   try {
     await AppDb.instance.initialize();
-    final cleanupDone = await AppDb.instance.getBoolSetting('classifier_cleanup_v14_done', fallback: false);
+    final cleanupDone = await AppDb.instance.getBoolSetting('classifier_cleanup_v15_done', fallback: false);
     if (!cleanupDone) {
       try {
         await NativeBridge.reclassifyStoredSms();
-        await AppDb.instance.setSetting('classifier_cleanup_v14_done', '1');
+        await AppDb.instance.setSetting('classifier_cleanup_v15_done', '1');
       } catch (e) {
         debugPrint('Stored SMS cleanup skipped: $e');
       }
@@ -147,7 +147,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     ];
 
     return Scaffold(
-      extendBody: true,
+      extendBody: false,
       body: SafeArea(bottom: false, child: IndexedStack(index: index, children: pages)),
       bottomNavigationBar: SafeArea(
         top: false,
@@ -172,16 +172,56 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 }
 
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   final VoidCallback onChanged;
   final ValueChanged<int> onNavigate;
   const HomePage({super.key, required this.onChanged, required this.onNavigate});
 
-  Future<List<dynamic>> load() async => [
-        await AppDb.instance.monthTotalsByType(),
-        await AppDb.instance.overallBudget(),
-        await AppDb.instance.recentTransactions(),
-      ];
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String period = 'month';
+
+  (int, int) _range() {
+    final now = DateTime.now();
+    final endOfToday = DateTime(now.year, now.month, now.day + 1).millisecondsSinceEpoch;
+    switch (period) {
+      case 'day':
+        return (DateTime(now.year, now.month, now.day).millisecondsSinceEpoch, endOfToday);
+      case 'week':
+        final startDay = DateTime(now.year, now.month, now.day).subtract(Duration(days: now.weekday - 1));
+        return (startDay.millisecondsSinceEpoch, endOfToday);
+      case 'total':
+        return (0, endOfToday);
+      default:
+        return (DateTime(now.year, now.month, 1).millisecondsSinceEpoch, endOfToday);
+    }
+  }
+
+  String get _periodTitle => switch (period) {
+        'day' => "TODAY'S SPENDING",
+        'week' => 'WEEKLY SPENDING',
+        'total' => 'ALL-TIME SPENDING',
+        _ => 'MONTHLY SPENDING',
+      };
+
+  String get _periodSubtitle => switch (period) {
+        'day' => 'Today',
+        'week' => 'This week',
+        'total' => 'All recorded transactions',
+        _ => DateFormat('MMMM yyyy').format(DateTime.now()),
+      };
+
+  Future<List<dynamic>> load() async {
+    final range = _range();
+    return [
+      await AppDb.instance.totalsByTypeForPeriod(range.$1, range.$2),
+      await AppDb.instance.overallBudget(),
+      await AppDb.instance.searchTransactions(startMs: range.$1, endMs: range.$2, limit: 6),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -198,12 +238,15 @@ class HomePage extends StatelessWidget {
         final invested = totals['investment'] ?? 0;
         final income = totals['income'] ?? 0;
         final refunds = totals['refund'] ?? 0;
-        final remaining = budget <= 0 ? 0.0 : (budget - spent).clamp(0, double.infinity).toDouble();
-        final progress = budget <= 0 ? 0.0 : (spent / budget).clamp(0.0, 1.0).toDouble();
+        final monthlyBudgetMode = period == 'month';
+        final remaining = !monthlyBudgetMode || budget <= 0 ? 0.0 : (budget - spent).clamp(0, double.infinity).toDouble();
+        final progress = !monthlyBudgetMode || budget <= 0 ? 0.0 : (spent / budget).clamp(0.0, 1.0).toDouble();
 
         return RefreshIndicator(
-          onRefresh: () async => onChanged(),
+          onRefresh: () async => widget.onChanged(),
           child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
             padding: const EdgeInsets.fromLTRB(18, 18, 18, 104),
             children: [
               Row(
@@ -213,7 +256,7 @@ class HomePage extends StatelessWidget {
                     height: 52,
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: Theme.of(context).cardColor,
                       borderRadius: BorderRadius.circular(18),
                       boxShadow: const [BoxShadow(color: Color(0x12000000), blurRadius: 18, offset: Offset(0, 6))],
                     ),
@@ -221,103 +264,55 @@ class HomePage extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   const Expanded(child: PageHeader(title: 'Expense Tracker', subtitle: 'Your money, automatically organised')),
-                  IconButton.filledTonal(onPressed: onChanged, icon: const Icon(Icons.sync_rounded)),
+                  IconButton.filledTonal(onPressed: widget.onChanged, icon: const Icon(Icons.sync_rounded)),
                 ],
               ),
-              const SizedBox(height: 22),
-              Container(
-                padding: const EdgeInsets.all(22),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0xFF08794D), Color(0xFF0FAE6D), Color(0xFF34C981)],
-                  ),
-                  borderRadius: BorderRadius.circular(28),
-                  boxShadow: const [BoxShadow(color: Color(0x33087A4D), blurRadius: 28, offset: Offset(0, 14))],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              const SizedBox(height: 18),
+              SizedBox(
+                height: 42,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
                   children: [
-                    Row(
-                      children: [
-                        const Expanded(child: Text('MONTHLY SPENDING', style: TextStyle(color: Colors.white70, letterSpacing: 1.1, fontSize: 12, fontWeight: FontWeight.w800))),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(color: Colors.white.withValues(alpha: .16), borderRadius: BorderRadius.circular(99)),
-                          child: Text('${(progress * 100).round()}% used', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 12)),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Text(money.format(spent), style: const TextStyle(color: Colors.white, fontSize: 38, height: 1, fontWeight: FontWeight.w900, letterSpacing: -1.2)),
-                    const SizedBox(height: 6),
-                    Text(
-                      budget > 0 ? '${money.format(remaining)} left from ${money.format(budget)}' : 'Set a monthly budget to track progress',
-                      style: const TextStyle(color: Color(0xFFE7FFF1), fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(height: 18),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
-                      child: LinearProgressIndicator(
-                        value: progress,
-                        minHeight: 9,
-                        backgroundColor: Colors.white.withValues(alpha: .18),
-                        valueColor: const AlwaysStoppedAnimation(Colors.white),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Expanded(child: _HeroStat(label: 'Income', value: money.format(income), icon: Icons.arrow_downward_rounded)),
-                        _heroDivider(),
-                        Expanded(child: _HeroStat(label: 'Invested', value: money.format(invested), icon: Icons.trending_up_rounded)),
-                        _heroDivider(),
-                        Expanded(child: _HeroStat(label: 'Refunds', value: money.format(refunds), icon: Icons.replay_rounded)),
-                      ],
-                    ),
+                    _periodChip('total', 'Total', Icons.all_inclusive_rounded),
+                    _periodChip('month', 'Month', Icons.calendar_month_rounded),
+                    _periodChip('week', 'Week', Icons.date_range_rounded),
+                    _periodChip('day', 'Day', Icons.today_rounded),
                   ],
                 ),
               ),
+              const SizedBox(height: 16),
+              _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress),
               const SizedBox(height: 22),
               const SectionHeader(title: 'Quick actions', subtitle: 'Common things, one tap away'),
               const SizedBox(height: 12),
               Row(
                 children: [
-                  Expanded(child: QuickActionCard(icon: Icons.qr_code_2_rounded, label: 'Pay UPI', caption: 'Save note', onTap: () => onNavigate(2))),
+                  Expanded(child: QuickActionCard(icon: Icons.qr_code_2_rounded, label: 'Pay UPI', caption: 'Scan or enter', onTap: () => widget.onNavigate(2))),
                   const SizedBox(width: 10),
-                  Expanded(child: QuickActionCard(icon: Icons.add_rounded, label: 'Add', caption: 'Manual entry', onTap: () async { await showAddTransaction(context); onChanged(); })),
+                  Expanded(child: QuickActionCard(icon: Icons.add_rounded, label: 'Add', caption: 'Manual entry', onTap: () async { await showAddTransaction(context); widget.onChanged(); })),
                   const SizedBox(width: 10),
-                  Expanded(child: QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Budget', caption: 'Set limits', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); onChanged(); })),
+                  Expanded(child: QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Budget', caption: 'Set limits', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); widget.onChanged(); })),
                 ],
               ),
-              const SizedBox(height: 12),
-              Material(
-                color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .55),
-                borderRadius: BorderRadius.circular(22),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(22),
-                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EnhancementHubPage())),
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Row(children: [
-                      CircleAvatar(backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Colors.white, child: const Icon(Icons.auto_awesome_rounded)),
-                      const SizedBox(width: 12),
-                      const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text('Smart Finance Hub', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-                        SizedBox(height: 3),
-                        Text('Transfers, subscriptions, receipt scan, backup, net worth and more'),
-                      ])),
-                      const Icon(Icons.chevron_right_rounded),
-                    ]),
-                  ),
-                ),
+              const SizedBox(height: 22),
+              SectionHeader(
+                title: 'Recurring',
+                subtitle: 'Subscriptions, SIPs, EMIs and regular bills',
+                actionLabel: 'View all',
+                onAction: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RecurringPaymentsPage())),
               ),
+              const SizedBox(height: 12),
+              const _HomeRecurringPreview(),
               const SizedBox(height: 24),
-              SectionHeader(title: 'Recent activity', subtitle: recent.isEmpty ? 'Your latest transactions will appear here' : '${recent.length} most recent', actionLabel: 'View all', onAction: () => onNavigate(1)),
+              SectionHeader(
+                title: 'Recent activity',
+                subtitle: recent.isEmpty ? 'No activity for $_periodSubtitle' : '${recent.length} most recent for $_periodSubtitle',
+                actionLabel: 'View all',
+                onAction: () => widget.onNavigate(1),
+              ),
               const SizedBox(height: 12),
               if (recent.isEmpty)
-                const EmptyCard(text: 'No transactions yet. Turn on SMS or PhonePe tracking in Settings, or add one manually.')
+                EmptyCard(text: 'No transactions found for $_periodSubtitle.')
               else
                 ...recent.map(
                   (t) => Padding(
@@ -325,11 +320,8 @@ class HomePage extends StatelessWidget {
                     child: TransactionTile(
                       tx: t,
                       onTap: () async {
-                        await Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (_) => TransactionDetailsPage(transaction: t)),
-                        );
-                        onChanged();
+                        await Navigator.push(context, MaterialPageRoute(builder: (_) => TransactionDetailsPage(transaction: t)));
+                        widget.onChanged();
                       },
                     ),
                   ),
@@ -341,7 +333,268 @@ class HomePage extends StatelessWidget {
     );
   }
 
+  Widget _periodChip(String value, String label, IconData icon) {
+    final selected = period == value;
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        avatar: Icon(icon, size: 17, color: selected ? const Color(0xFF087849) : null),
+        label: Text(label),
+        selected: selected,
+        showCheckmark: false,
+        onSelected: (_) => setState(() => period = value),
+        selectedColor: const Color(0xFFDDF5E9),
+        backgroundColor: Theme.of(context).cardColor,
+        labelStyle: TextStyle(
+          color: selected ? const Color(0xFF087849) : Theme.of(context).colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w800,
+        ),
+        side: BorderSide(color: selected ? const Color(0xFFB7E5CD) : Theme.of(context).dividerColor),
+      ),
+    );
+  }
+
+  Widget _heroCard({
+    required double spent,
+    required double income,
+    required double invested,
+    required double refunds,
+    required double budget,
+    required double remaining,
+    required double progress,
+  }) {
+    final monthlyBudgetMode = period == 'month';
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF08794D), Color(0xFF0FAE6D), Color(0xFF34C981)],
+        ),
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: const [BoxShadow(color: Color(0x33087A4D), blurRadius: 28, offset: Offset(0, 14))],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(_periodTitle, style: const TextStyle(color: Colors.white70, letterSpacing: 1.1, fontSize: 12, fontWeight: FontWeight.w800))),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(color: Colors.white.withValues(alpha: .16), borderRadius: BorderRadius.circular(99)),
+                child: Text(monthlyBudgetMode && budget > 0 ? '${(progress * 100).round()}% budget' : _periodSubtitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 11)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(money.format(spent), style: const TextStyle(color: Colors.white, fontSize: 38, height: 1, fontWeight: FontWeight.w900, letterSpacing: -1.2)),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            monthlyBudgetMode
+                ? (budget > 0 ? '${money.format(remaining)} left from ${money.format(budget)} monthly budget' : 'Set a monthly budget to track progress')
+                : 'Expense for $_periodSubtitle',
+            style: const TextStyle(color: Color(0xFFE7FFF1), fontWeight: FontWeight.w600),
+          ),
+          if (monthlyBudgetMode) ...[
+            const SizedBox(height: 18),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: LinearProgressIndicator(
+                value: progress,
+                minHeight: 9,
+                backgroundColor: Colors.white.withValues(alpha: .18),
+                valueColor: const AlwaysStoppedAnimation(Colors.white),
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              Expanded(child: _HeroStat(label: 'Income', value: money.format(income), icon: Icons.arrow_downward_rounded)),
+              _heroDivider(),
+              Expanded(child: _HeroStat(label: 'Invested', value: money.format(invested), icon: Icons.trending_up_rounded)),
+              _heroDivider(),
+              Expanded(child: _HeroStat(label: 'Refunds', value: money.format(refunds), icon: Icons.replay_rounded)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   static Widget _heroDivider() => Container(width: 1, height: 36, color: Colors.white24, margin: const EdgeInsets.symmetric(horizontal: 8));
+}
+
+
+class _HomeRecurringPreview extends StatelessWidget {
+  const _HomeRecurringPreview();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<List<Map<String, Object?>>>(
+      future: AppDb.instance.detectRecurringPayments(),
+      builder: (context, snap) {
+        if (snap.hasError) {
+          return Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: Theme.of(context).dividerColor),
+            ),
+            child: const Row(
+              children: [
+                Icon(Icons.info_outline_rounded),
+                SizedBox(width: 10),
+                Expanded(child: Text('Recurring analysis is temporarily unavailable.')),
+              ],
+            ),
+          );
+        }
+        if (!snap.hasData) {
+          return Container(
+            height: 88,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: Theme.of(context).dividerColor),
+            ),
+            child: const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            ),
+          );
+        }
+
+        final items = snap.data!;
+        if (items.isEmpty) {
+          return Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: Theme.of(context).dividerColor),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                CircleAvatar(child: Icon(Icons.autorenew_rounded)),
+                SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'No recurring payment detected yet',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                      SizedBox(height: 4),
+                      Text(
+                        'The app waits for a strong repeated-payment pattern instead of guessing from one transaction.',
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        final visible = items.take(2).toList();
+        return Container(
+          padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
+          decoration: BoxDecoration(
+            color: Theme.of(context).cardColor,
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(color: Theme.of(context).dividerColor),
+          ),
+          child: Column(
+            children: [
+              for (var i = 0; i < visible.length; i++) ...[
+                _RecurringHomeRow(item: visible[i]),
+                if (i != visible.length - 1) const Divider(height: 1),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RecurringHomeRow extends StatelessWidget {
+  final Map<String, Object?> item;
+  const _RecurringHomeRow({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final merchant = '${item['merchant'] ?? 'Recurring payment'}';
+    final average = (item['averageAmount'] as num?)?.toDouble() ?? 0;
+    final nextDueMs = (item['nextDue'] as num?)?.toInt() ?? 0;
+    final frequency = '${item['frequency'] ?? 'Recurring'}';
+    final confidence = (((item['confidence'] as num?)?.toDouble() ?? 0) * 100).round();
+    final due = nextDueMs > 0
+        ? DateFormat('dd MMM').format(DateTime.fromMillisecondsSinceEpoch(nextDueMs))
+        : '—';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .7),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(Icons.autorenew_rounded),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  merchant,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '$frequency • next $due • $confidence% confidence',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 92),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(
+                moneyExact.format(average),
+                style: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class TransactionsPage extends StatefulWidget {
@@ -903,14 +1156,14 @@ class _PayUpiPageState extends State<PayUpiPage> {
             TextField(controller: note, maxLines: 2, decoration: const InputDecoration(labelText: 'Note / remark', hintText: 'Example: Dinner with client')),
             const SizedBox(height: 10),
             const Text(
-              'The note is stored in this app first and is also sent to the UPI app as the transaction note. This is how we preserve notes without reading PhonePe private history.',
+              'The note is stored locally first and is also sent with the UPI request. When you continue, Android will show the compatible UPI apps installed on this phone, such as Google Pay, PhonePe or Paytm.',
               style: TextStyle(color: Colors.black54, height: 1.35),
             ),
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: paying ? null : pay,
               icon: paying ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.account_balance_wallet_outlined),
-              label: Text(paying ? 'Opening UPI…' : 'Open PhonePe / UPI'),
+              label: Text(paying ? 'Opening UPI apps…' : 'Choose UPI app'),
             ),
           ],
         );
@@ -1911,8 +2164,8 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             ListTile(
               leading: const Icon(Icons.auto_awesome_rounded),
-              title: const Text('Smart Finance Hub'),
-              subtitle: const Text('Transfers, recurring payments, search, receipts, backup, net worth'),
+              title: const Text('More tools'),
+              subtitle: const Text('Search, cash flow, receipts, review, backup and privacy'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EnhancementHubPage())),
             ),
@@ -2131,7 +2384,7 @@ class _HeroStat extends StatelessWidget {
         children: [
           Row(children: [Icon(icon, color: Colors.white70, size: 15), const SizedBox(width: 4), Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w700)))]),
           const SizedBox(height: 5),
-          Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w900)),
+          FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft, child: Text(value, maxLines: 1, style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w900))),
         ],
       );
 }

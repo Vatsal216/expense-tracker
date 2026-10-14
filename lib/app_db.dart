@@ -224,7 +224,7 @@ class AppDb {
       'smart_dedup_enabled': '1',
       'recurring_detection_enabled': '1',
       'privacy_lock_enabled': '0',
-      'secure_screen_enabled': '1',
+      'secure_screen_enabled': '0',
       'dark_mode': '0',
       'smart_alerts_enabled': '1',
     };
@@ -310,7 +310,7 @@ class AppDb {
     final fingerprint = ref.isNotEmpty ? 'upi-$ref' : 'upi-${amount.toStringAsFixed(2)}-${normalized.toLowerCase()}-${now ~/ 60000}';
     return db.insert('transactions', {
       'amount': amount, 'type': 'expense', 'category': category, 'merchant': rawMerchant, 'normalized_merchant': normalized,
-      'note': note.trim(), 'source': 'upi_intent', 'raw_message': rawResponse, 'sender': '', 'payment_method': 'UPI / PhonePe',
+      'note': note.trim(), 'source': 'upi_intent', 'raw_message': rawResponse, 'sender': '', 'payment_method': 'UPI',
       'account_hint': '', 'upi_reference': ref, 'classification_method': 'upi_intent', 'classification_confidence': 1.0,
       'review_status': 'accepted', 'occurred_at': now, 'created_at': now, 'fingerprint': fingerprint, 'is_manual': 0,
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
@@ -470,41 +470,173 @@ class AppDb {
     final income = totals['income'] ?? 0;
     final investment = totals['investment'] ?? 0;
     final refund = totals['refund'] ?? 0;
-    final net = income + refund - expense - investment;
+
+    // Transfers are intentionally excluded: moving money between the user's own
+    // accounts is neither income nor spending. Investments are a real cash
+    // outflow, but they are shown separately from day-to-day spending.
+    final inflow = income + refund;
+    final outflow = expense + investment;
+    final net = inflow - outflow;
+    final netExpense = math.max(0.0, expense - refund);
+
     final daysElapsed = math.max(1, now.day);
     final daysInMonth = DateTime(now.year, now.month + 1, 0).day;
     final dailyAverage = expense / daysElapsed;
     final projected = dailyAverage * daysInMonth;
-    final savingsRate = income <= 0 ? 0.0 : (net / income) * 100;
-    return {'income': income, 'expense': expense, 'investment': investment, 'refund': refund, 'net': net, 'dailyAverage': dailyAverage, 'projectedExpense': projected, 'savingsRate': savingsRate};
+
+    // Treat investments as savings allocation rather than "spending" for this
+    // percentage. This keeps the savings rate understandable and bounded.
+    final savingsRate = income <= 0
+        ? 0.0
+        : (((income - netExpense) / income) * 100).clamp(-999.0, 100.0).toDouble();
+
+    return {
+      'income': income,
+      'expense': expense,
+      'investment': investment,
+      'refund': refund,
+      'inflow': inflow,
+      'outflow': outflow,
+      'net': net,
+      'netExpense': netExpense,
+      'dailyAverage': dailyAverage,
+      'projectedExpense': projected,
+      'savingsRate': savingsRate,
+    };
   }
 
   Future<List<Map<String, Object?>>> detectRecurringPayments() async {
     if (!await getBoolSetting('recurring_detection_enabled', fallback: true)) return [];
     final db = await database;
-    final rows = await db.query('transactions', where: "review_status='accepted' AND type IN ('expense','investment')", orderBy: 'occurred_at ASC');
-    final groups = <String, List<Map<String,Object?>>>{};
-    for (final r in rows) {
-      final merchant = ((r['normalized_merchant'] as String?)?.trim().isNotEmpty ?? false) ? r['normalized_merchant'] as String : r['merchant'] as String;
-      final key = '${merchant.toLowerCase()}|${r['category']}';
-      groups.putIfAbsent(key, () => []).add(r);
+    final rows = await db.query(
+      'transactions',
+      where: "review_status='accepted' AND type IN ('expense','investment')",
+      orderBy: 'occurred_at ASC',
+    );
+
+    final groups = <String, List<Map<String, Object?>>>{};
+    for (final row in rows) {
+      final normalized = (row['normalized_merchant'] as String?)?.trim() ?? '';
+      final merchant = normalized.isNotEmpty ? normalized : (row['merchant'] as String? ?? '').trim();
+      if (merchant.isEmpty) continue;
+      final key = '${merchant.toLowerCase()}|${row['category']}|${row['type']}';
+      groups.putIfAbsent(key, () => <Map<String, Object?>>[]).add(row);
     }
-    final out = <Map<String,Object?>>[];
-    for (final g in groups.values) {
-      if (g.length < 2) continue;
+
+    bool hasRecurringHint(Map<String, Object?> row) {
+      final text = '${row['raw_message'] ?? ''} ${row['note'] ?? ''}'.toLowerCase();
+      const hints = [
+        'subscription', 'autopay', 'auto-pay', 'auto debit', 'auto-debit',
+        'standing instruction', 'recurring', 'monthly plan', 'monthly bill',
+        'emi', 'sip', 'premium', 'membership', 'renewal',
+      ];
+      return hints.any(text.contains);
+    }
+
+    String? frequencyFor(int days) {
+      if (days >= 5 && days <= 9) return 'Weekly';
+      if (days >= 25 && days <= 35) return 'Monthly';
+      if (days >= 80 && days <= 100) return 'Quarterly';
+      if (days >= 350 && days <= 380) return 'Yearly';
+      return null;
+    }
+
+    int targetFor(String frequency) => switch (frequency) {
+          'Weekly' => 7,
+          'Monthly' => 30,
+          'Quarterly' => 91,
+          'Yearly' => 365,
+          _ => 30,
+        };
+
+    final out = <Map<String, Object?>>[];
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    for (final original in groups.values) {
+      // More recent history is more relevant and avoids old merchant behavior
+      // dominating the current pattern.
+      final g = original.length > 10 ? original.sublist(original.length - 10) : original;
+      final explicit = g.any(hasRecurringHint);
+      if (g.length < (explicit ? 2 : 3)) continue;
+
       final intervals = <int>[];
-      for (var i=1;i<g.length;i++) intervals.add(((g[i]['occurred_at'] as int)-(g[i-1]['occurred_at'] as int)) ~/ Duration.millisecondsPerDay);
-      final plausible = intervals.where((d) => (d>=5 && d<=9) || (d>=25 && d<=35) || (d>=80 && d<=100) || (d>=350 && d<=380)).toList();
-      if (plausible.isEmpty) continue;
-      plausible.sort();
-      final interval = plausible[plausible.length~/2];
-      final amounts = g.map((e)=>(e['amount'] as num).toDouble()).toList();
-      final avg = amounts.reduce((a,b)=>a+b)/amounts.length;
+      for (var i = 1; i < g.length; i++) {
+        final delta = (g[i]['occurred_at'] as num).toInt() - (g[i - 1]['occurred_at'] as num).toInt();
+        final days = (delta / Duration.millisecondsPerDay).round();
+        if (days > 0) intervals.add(days);
+      }
+      if (intervals.isEmpty) continue;
+
+      final candidates = <String, List<int>>{};
+      for (final d in intervals) {
+        final f = frequencyFor(d);
+        if (f != null) candidates.putIfAbsent(f, () => <int>[]).add(d);
+      }
+      if (candidates.isEmpty) continue;
+
+      final ranked = candidates.entries.toList()
+        ..sort((a, b) => b.value.length.compareTo(a.value.length));
+      final best = ranked.first;
+      final requiredMatches = explicit && intervals.length == 1
+          ? 1
+          : math.max(2, (intervals.length * 0.67).ceil());
+      if (best.value.length < requiredMatches) continue;
+
+      final matchedIntervals = [...best.value]..sort();
+      final intervalDays = matchedIntervals[matchedIntervals.length ~/ 2];
+      final target = targetFor(best.key);
+      final intervalError = matchedIntervals
+              .map((d) => (d - target).abs() / target)
+              .fold<double>(0, (a, b) => a + b) /
+          matchedIntervals.length;
+
+      final amounts = g.map((e) => (e['amount'] as num).toDouble()).toList()..sort();
+      final medianAmount = amounts[amounts.length ~/ 2];
+      if (medianAmount <= 0) continue;
+      final avgAmount = amounts.fold<double>(0, (a, b) => a + b) / amounts.length;
+      final avgDeviation = amounts
+              .map((a) => (a - medianAmount).abs() / medianAmount)
+              .fold<double>(0, (a, b) => a + b) /
+          amounts.length;
+
       final last = g.last;
-      final next = (last['occurred_at'] as int) + interval*Duration.millisecondsPerDay;
-      out.add({'merchant': (last['normalized_merchant'] as String?)?.isNotEmpty == true ? last['normalized_merchant'] : last['merchant'], 'category': last['category'], 'averageAmount': avg, 'intervalDays': interval, 'nextDue': next, 'occurrences': g.length});
+      final variableBill = ['bills', 'utilities', 'electricity', 'mobile', 'broadband']
+          .any((x) => '${last['category']}'.toLowerCase().contains(x));
+      final allowedAmountVariation = variableBill ? 0.40 : (explicit ? 0.25 : 0.18);
+      if (avgDeviation > allowedAmountVariation) continue;
+
+      final occurrenceScore = (g.length / 5.0).clamp(0.0, 1.0);
+      final intervalScore = (1.0 - intervalError).clamp(0.0, 1.0);
+      final amountScore = (1.0 - (avgDeviation / math.max(0.01, allowedAmountVariation))).clamp(0.0, 1.0);
+      final confidence = (0.40 * intervalScore + 0.30 * amountScore + 0.20 * occurrenceScore + (explicit ? 0.10 : 0.0))
+          .clamp(0.0, 0.99)
+          .toDouble();
+      if (confidence < 0.70) continue;
+
+      var nextDue = (last['occurred_at'] as num).toInt() + intervalDays * Duration.millisecondsPerDay;
+      // If the pattern has missed a cycle, advance to the next plausible future
+      // occurrence rather than showing a permanently overdue date.
+      while (nextDue < nowMs - 2 * Duration.millisecondsPerDay) {
+        nextDue += intervalDays * Duration.millisecondsPerDay;
+      }
+
+      final normalized = (last['normalized_merchant'] as String?)?.trim() ?? '';
+      out.add({
+        'merchant': normalized.isNotEmpty ? normalized : last['merchant'],
+        'category': last['category'],
+        'type': last['type'],
+        'averageAmount': avgAmount,
+        'intervalDays': intervalDays,
+        'frequency': best.key,
+        'nextDue': nextDue,
+        'occurrences': g.length,
+        'confidence': confidence,
+        'amountVariationPct': avgDeviation * 100,
+        'explicitHint': explicit,
+      });
     }
-    out.sort((a,b)=>(a['nextDue'] as int).compareTo(b['nextDue'] as int));
+
+    out.sort((a, b) => (a['nextDue'] as int).compareTo(b['nextDue'] as int));
     return out;
   }
 
@@ -647,7 +779,7 @@ class AppDb {
   Future<List<Map<String,Object?>>> netWorthItems() async { final db=await database; return db.query('net_worth_items',orderBy:'item_type,name'); }
   Future<void> saveNetWorthItem({int? id,required String name,required String itemType,required String category,required double balance}) async { final db=await database; final values={'name':name,'item_type':itemType,'category':category,'balance':balance,'updated_at':DateTime.now().millisecondsSinceEpoch}; if(id==null){await db.insert('net_worth_items',values);}else{await db.update('net_worth_items',values,where:'id=?',whereArgs:[id]);} }
   Future<void> deleteNetWorthItem(int id) async { final db=await database; await db.delete('net_worth_items',where:'id=?',whereArgs:[id]); }
-  Future<Map<String,double>> netWorthSummary() async { final db=await database; final rows=await db.rawQuery("SELECT item_type,COALESCE(SUM(balance),0) total FROM net_worth_items GROUP BY item_type"); double assets=0,liabilities=0; for(final r in rows){if(r['item_type']=='asset')assets=(r['total'] as num).toDouble();else liabilities=(r['total'] as num).toDouble();} final acc=await db.rawQuery("SELECT COALESCE(SUM(current_balance),0) total FROM accounts WHERE include_net_worth=1"); assets += (acc.first['total'] as num).toDouble(); return {'assets':assets,'liabilities':liabilities,'netWorth':assets-liabilities}; }
+  Future<Map<String,double>> netWorthSummary() async { final db=await database; final rows=await db.rawQuery("SELECT item_type,COALESCE(SUM(balance),0) total FROM net_worth_items GROUP BY item_type"); double assets=0,liabilities=0; for(final r in rows){if(r['item_type']=='asset')assets=(r['total'] as num).toDouble();else liabilities=(r['total'] as num).toDouble();} return {'assets':assets,'liabilities':liabilities,'netWorth':assets-liabilities}; }
 
   Future<Map<String,Object?>> exportSnapshot() async {
     final db=await database;
