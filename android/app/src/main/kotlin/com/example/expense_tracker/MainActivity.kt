@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.provider.Telephony
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -16,8 +17,10 @@ class MainActivity : FlutterActivity() {
     private val channelName = "expense_tracker/native"
     private val smsRequestCode = 7001
     private val notificationRequestCode = 7002
+    private val smsHistoryRequestCode = 7003
     private val upiRequestCode = 7100
     private var pendingSmsResult: MethodChannel.Result? = null
+    private var pendingSmsHistoryResult: MethodChannel.Result? = null
     private var pendingNotificationResult: MethodChannel.Result? = null
     private var pendingUpiResult: MethodChannel.Result? = null
 
@@ -27,6 +30,9 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "requestSmsPermission" -> requestSmsPermission(result)
                 "hasSmsPermission" -> result.success(hasSmsPermission())
+                "requestSmsHistoryPermission" -> requestSmsHistoryPermission(result)
+                "hasSmsHistoryPermission" -> result.success(hasSmsHistoryPermission())
+                "importHistoricalSms" -> importHistoricalSms(result)
                 "requestNotificationPermission" -> requestNotificationPermission(result)
                 "hasNotificationPermission" -> result.success(hasNotificationPermission())
                 "hasNotificationListenerPermission" -> result.success(hasNotificationListenerPermission())
@@ -62,6 +68,89 @@ class MainActivity : FlutterActivity() {
         }
         pendingSmsResult = result
         requestPermissions(arrayOf(Manifest.permission.RECEIVE_SMS), smsRequestCode)
+    }
+
+    private fun hasSmsHistoryPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestSmsHistoryPermission(result: MethodChannel.Result) {
+        if (hasSmsHistoryPermission()) {
+            result.success(true)
+            return
+        }
+        pendingSmsHistoryResult = result
+        requestPermissions(arrayOf(Manifest.permission.READ_SMS), smsHistoryRequestCode)
+    }
+
+    private fun importHistoricalSms(result: MethodChannel.Result) {
+        if (!hasSmsHistoryPermission()) {
+            result.error("READ_SMS_REQUIRED", "SMS history permission is required.", null)
+            return
+        }
+
+        Thread {
+            try {
+                val db = ExpenseDatabase(applicationContext)
+                var scanned = 0
+                var imported = 0
+                var duplicates = 0
+                var ignored = 0
+
+                val projection = arrayOf(
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                )
+
+                contentResolver.query(
+                    Telephony.Sms.Inbox.CONTENT_URI,
+                    projection,
+                    null,
+                    null,
+                    "${Telephony.Sms.DATE} DESC",
+                )?.use { cursor ->
+                    val addressIndex = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+                    val bodyIndex = cursor.getColumnIndex(Telephony.Sms.BODY)
+                    val dateIndex = cursor.getColumnIndex(Telephony.Sms.DATE)
+
+                    while (cursor.moveToNext()) {
+                        scanned++
+                        val sender = if (addressIndex >= 0) cursor.getString(addressIndex).orEmpty() else ""
+                        val body = if (bodyIndex >= 0) cursor.getString(bodyIndex).orEmpty() else ""
+                        val occurredAt = if (dateIndex >= 0) cursor.getLong(dateIndex) else System.currentTimeMillis()
+
+                        val parsed = TransactionParser.parseSms(db, sender, body, occurredAt)
+                        if (parsed == null) {
+                            ignored++
+                            continue
+                        }
+
+                        val inserted = db.insertTransaction(parsed, "sms")
+                        if (inserted > 0) imported++ else duplicates++
+                    }
+                }
+
+                runOnUiThread {
+                    result.success(
+                        mapOf(
+                            "scanned" to scanned,
+                            "imported" to imported,
+                            "duplicates" to duplicates,
+                            "ignored" to ignored,
+                        )
+                    )
+                }
+            } catch (e: SecurityException) {
+                runOnUiThread {
+                    result.error("READ_SMS_DENIED", "SMS history permission was denied.", null)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    result.error("SMS_IMPORT_FAILED", e.message ?: "Historical SMS import failed.", null)
+                }
+            }
+        }.start()
     }
 
     private fun hasNotificationPermission(): Boolean =
@@ -168,6 +257,10 @@ class MainActivity : FlutterActivity() {
             smsRequestCode -> {
                 pendingSmsResult?.success(granted)
                 pendingSmsResult = null
+            }
+            smsHistoryRequestCode -> {
+                pendingSmsHistoryResult?.success(granted)
+                pendingSmsHistoryResult = null
             }
             notificationRequestCode -> {
                 pendingNotificationResult?.success(granted)
