@@ -20,11 +20,17 @@ object TransactionParser {
         if (decision.label == "ignore" || decision.label == "pending") return null
 
         val category = categoryFor(decision.label, lower, rule)
-        val merchant = rule?.merchant ?: extractMerchant(text) ?: sender.ifBlank { "Unknown" }
+        val cardPayment = decision.label == "transfer" && isCreditCardBillPayment(lower)
+        val merchant = if (cardPayment) {
+            extractCreditCardMerchant(text) ?: "Credit Card Payment"
+        } else {
+            rule?.merchant ?: extractMerchant(text) ?: sender.ifBlank { "Unknown" }
+        }
         val note = extractNote(text)
         val upiReference = upiRefRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
         val accountHint = accountRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
         val paymentMethod = when {
+            cardPayment -> "Bank → Credit Card"
             lower.contains("upi") -> "UPI"
             lower.contains("card") -> "Card"
             else -> "Bank"
@@ -45,6 +51,7 @@ object TransactionParser {
             fingerprint = fingerprint,
             classificationMethod = decision.method,
             classificationConfidence = decision.confidence,
+            reviewStatus = if (decision.method == "low_confidence_review") "needs_review" else "accepted",
         )
     }
 
@@ -77,6 +84,7 @@ object TransactionParser {
             fingerprint = fingerprint,
             classificationMethod = decision.method,
             classificationConfidence = decision.confidence,
+            reviewStatus = if (decision.method == "low_confidence_review") "needs_review" else "accepted",
         )
     }
 
@@ -93,7 +101,7 @@ object TransactionParser {
 
     private fun categoryFor(type: String, lower: String, rule: RuleMatch?): String = when (type) {
         "refund" -> "Refund"
-        "transfer" -> "Transfer"
+        "transfer" -> if (isCreditCardBillPayment(lower)) "Credit Card Payment" else "Transfer"
         "investment" -> if (rule?.type == "investment") rule.category else when {
             lower.contains("mutual fund") || lower.contains("sip") -> "Mutual Funds"
             lower.contains("gold") -> "Gold"
@@ -116,6 +124,30 @@ object TransactionParser {
 
     private fun extractNote(text: String): String =
         noteRegex.find(text)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+    private fun isCreditCardBillPayment(lower: String): Boolean =
+        lower.contains("credit card") && (
+            (lower.contains("payment of") && lower.contains("has been received")) ||
+            lower.contains("payment received towards") ||
+            lower.contains("payment received for") ||
+            lower.contains("credit card payment received") ||
+            lower.contains("received towards your") ||
+            (lower.contains("thank you for your payment") && lower.contains("card")) ||
+            lower.contains("card bill payment successful")
+        )
+
+    private fun extractCreditCardMerchant(text: String): String? {
+        val patterns = listOf(
+            Regex("(?i)(?:towards|for)\\s+(?:your\\s+)?([A-Za-z][A-Za-z .&'-]{1,40}?credit card)"),
+            Regex("(?i)([A-Za-z][A-Za-z .&'-]{1,40}?credit card)")
+        )
+        for (pattern in patterns) {
+            val value = pattern.find(text)?.groupValues?.getOrNull(1)
+                ?.trim()?.trimEnd('.', ',', '-', ':')
+            if (!value.isNullOrBlank()) return value
+        }
+        return null
+    }
 
     private fun fingerprint(value: String): String {
         val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())

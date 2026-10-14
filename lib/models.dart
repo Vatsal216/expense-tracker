@@ -4,6 +4,7 @@ class TxRecord {
   final String type;
   final String category;
   final String merchant;
+  final String normalizedMerchant;
   final String note;
   final String source;
   final String rawMessage;
@@ -13,6 +14,11 @@ class TxRecord {
   final String upiReference;
   final String classificationMethod;
   final double classificationConfidence;
+  final String reviewStatus;
+  final String transferGroupId;
+  final String dedupCluster;
+  final int? parentTransactionId;
+  final bool isSplitParent;
   final int occurredAt;
   final int createdAt;
   final String fingerprint;
@@ -24,6 +30,7 @@ class TxRecord {
     required this.type,
     required this.category,
     required this.merchant,
+    this.normalizedMerchant = '',
     this.note = '',
     required this.source,
     this.rawMessage = '',
@@ -33,6 +40,11 @@ class TxRecord {
     this.upiReference = '',
     this.classificationMethod = 'legacy',
     this.classificationConfidence = 1.0,
+    this.reviewStatus = 'accepted',
+    this.transferGroupId = '',
+    this.dedupCluster = '',
+    this.parentTransactionId,
+    this.isSplitParent = false,
     required this.occurredAt,
     required this.createdAt,
     required this.fingerprint,
@@ -45,6 +57,7 @@ class TxRecord {
         type: map['type'] as String,
         category: map['category'] as String,
         merchant: map['merchant'] as String,
+        normalizedMerchant: (map['normalized_merchant'] as String?) ?? '',
         note: (map['note'] as String?) ?? '',
         source: map['source'] as String,
         rawMessage: (map['raw_message'] as String?) ?? '',
@@ -54,6 +67,11 @@ class TxRecord {
         upiReference: (map['upi_reference'] as String?) ?? '',
         classificationMethod: (map['classification_method'] as String?) ?? 'legacy',
         classificationConfidence: ((map['classification_confidence'] as num?) ?? 1.0).toDouble(),
+        reviewStatus: (map['review_status'] as String?) ?? 'accepted',
+        transferGroupId: (map['transfer_group_id'] as String?) ?? '',
+        dedupCluster: (map['dedup_cluster'] as String?) ?? '',
+        parentTransactionId: (map['parent_transaction_id'] as num?)?.toInt(),
+        isSplitParent: ((map['is_split_parent'] as int?) ?? 0) == 1,
         occurredAt: map['occurred_at'] as int,
         createdAt: map['created_at'] as int,
         fingerprint: map['fingerprint'] as String,

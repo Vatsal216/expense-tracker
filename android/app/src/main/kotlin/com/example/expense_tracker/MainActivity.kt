@@ -9,11 +9,12 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.provider.Telephony
-import io.flutter.embedding.android.FlutterActivity
+import android.view.WindowManager
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private val channelName = "expense_tracker/native"
     private val smsRequestCode = 7001
     private val notificationRequestCode = 7002
@@ -33,6 +34,7 @@ class MainActivity : FlutterActivity() {
                 "requestSmsHistoryPermission" -> requestSmsHistoryPermission(result)
                 "hasSmsHistoryPermission" -> result.success(hasSmsHistoryPermission())
                 "importHistoricalSms" -> importHistoricalSms(result)
+                "reclassifyStoredSms" -> reclassifyStoredSms(result)
                 "requestNotificationPermission" -> requestNotificationPermission(result)
                 "hasNotificationPermission" -> result.success(hasNotificationPermission())
                 "hasNotificationListenerPermission" -> result.success(hasNotificationListenerPermission())
@@ -49,6 +51,23 @@ class MainActivity : FlutterActivity() {
                 }
                 "openAppSettings" -> {
                     startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                    result.success(null)
+                }
+                "setSecureScreen" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: true
+                    if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    else window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    result.success(null)
+                }
+                "updateHomeWidget" -> {
+                    ExpenseWidgetProvider.refresh(applicationContext)
+                    result.success(null)
+                }
+                "showSmartAlert" -> {
+                    val args = call.arguments as? Map<*, *>
+                    val title = args?.get("title")?.toString().orEmpty()
+                    val text = args?.get("text")?.toString().orEmpty()
+                    if (title.isNotBlank() && text.isNotBlank()) NotificationHelper.showBudgetAlert(applicationContext, title, text)
                     result.success(null)
                 }
                 "startUpiPayment" -> startUpiPayment(call.arguments as? Map<*, *>, result)
@@ -131,6 +150,7 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
+                ExpenseWidgetProvider.refresh(applicationContext)
                 runOnUiThread {
                     result.success(
                         mapOf(
@@ -148,6 +168,21 @@ class MainActivity : FlutterActivity() {
             } catch (e: Exception) {
                 runOnUiThread {
                     result.error("SMS_IMPORT_FAILED", e.message ?: "Historical SMS import failed.", null)
+                }
+            }
+        }.start()
+    }
+
+    private fun reclassifyStoredSms(result: MethodChannel.Result) {
+        Thread {
+            try {
+                val db = ExpenseDatabase(applicationContext)
+                val stats = db.reclassifyStoredSms()
+                ExpenseWidgetProvider.refresh(applicationContext)
+                runOnUiThread { result.success(stats) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    result.error("RECLASSIFY_FAILED", e.message ?: "Stored SMS reclassification failed.", null)
                 }
             }
         }.start()

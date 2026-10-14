@@ -1,0 +1,33 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center_vertical"
+    android:padding="16dp"
+    android:background="#F0FAF4">
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Expense Tracker"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:textColor="#087849" />
+    <TextView
+        android:id="@+id/widget_spent"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="₹0 spent"
+        android:textStyle="bold"
+        android:textSize="22sp"
+        android:textColor="#15211A" />
+    <TextView
+        android:id="@+id/widget_remaining"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:text="₹0 left"
+        android:textSize="12sp"
+        android:textColor="#5D6A62" />
+</LinearLayout>

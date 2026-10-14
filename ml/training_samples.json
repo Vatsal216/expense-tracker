@@ -1814,5 +1814,21 @@
   {
     "text": "Broker account debited Rs 1,250 for stock purchase",
     "label": "investment"
+  },
+  {
+    "text": "Payment of INR 29362.78 has been received towards your Axis Bank Credit Card XX1523 on 05-10-26 - Axis Bank",
+    "label": "transfer"
+  },
+  {
+    "text": "Your credit card payment received towards HDFC Bank Credit Card XX4455 for Rs 12500",
+    "label": "transfer"
+  },
+  {
+    "text": "Airtel Warning: SPAM | TATAMOTORS option chain metrics signal clean upside expansion; active stock guild credited Rs 8600 to 918989106607. http://fbiem.fintudos.com/jax",
+    "label": "ignore"
+  },
+  {
+    "text": "WARNING: SPAM | option chain trading signal buy call target price Rs 450 join telegram http://example.invalid",
+    "label": "ignore"
   }
 ]

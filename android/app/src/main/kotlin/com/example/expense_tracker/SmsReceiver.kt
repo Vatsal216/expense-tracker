@@ -19,10 +19,11 @@ class SmsReceiver : BroadcastReceiver() {
         val parsed = TransactionParser.parseSms(db, sender, body, occurredAt) ?: return
         val inserted = db.insertTransaction(parsed, "sms")
         if (inserted > 0) {
-            BudgetGuard.check(context.applicationContext, db, parsed)
+            if (parsed.reviewStatus == "accepted") BudgetGuard.check(context.applicationContext, db, parsed)
+            ExpenseWidgetProvider.refresh(context.applicationContext)
         }
         if (inserted > 0 && db.getSetting("notifications_enabled", "1") == "1") {
-            NotificationHelper.showTransaction(context, parsed)
+            NotificationHelper.showTransaction(context, parsed, inserted)
         }
     }
 }

@@ -55,13 +55,24 @@ object HybridMessageClassifier {
             )
         }
 
+        if (useNeural && neural.label !in setOf("ignore", "pending") && neural.confidence >= 0.25) {
+            return decision(
+                neural.label,
+                neural.confidence,
+                "low_confidence_review",
+                neural.label,
+                neural.confidence,
+                "uncertain financial message; saved to Needs Review"
+            )
+        }
+
         return decision(
             "ignore",
             1.0 - neural.confidence.coerceIn(0.0, 1.0),
             "low_confidence",
             neural.label,
             neural.confidence,
-            "uncertain message; not auto-saved"
+            "uncertain non-financial message"
         )
     }
 
@@ -69,6 +80,18 @@ object HybridMessageClassifier {
         val otp = listOf(" otp ", "otp:", "otp is", "one time password", "verification code")
             .any { " $lower ".contains(it) }
         if (otp) return decision("ignore", 1.0, "hard_gate", "ignore", 1.0, "OTP/security message")
+
+        val explicitSpam = listOf(
+            "warning: spam", "spam |", "spam:", "suspected spam", "reported as spam"
+        ).any { lower.contains(it) }
+        val marketTipSpam = listOf(
+            "option chain", "stock tip", "trading signal", "signal clean upside",
+            "buy call", "sell call", "target price", "stock guild", "intraday call",
+            "join telegram", "telegram channel", "whatsapp group"
+        ).any { lower.contains(it) }
+        if (explicitSpam || marketTipSpam) {
+            return decision("ignore", 1.0, "hard_gate", "ignore", 1.0, "spam/stock-tip message")
+        }
 
         val promotional = listOf(
             "pre-approved", "pre approved", "apply now", "exclusive offer", "limited offer",
@@ -85,25 +108,57 @@ object HybridMessageClassifier {
         }
 
         val future = listOf(
-            "will be debited", "will be auto-debited", "will be auto debited", "scheduled debit",
+            "will be debited", "shall be debited", "would be debited", "to be debited",
+            "will be auto-debited", "will be auto debited", "scheduled debit", "debit scheduled",
             "scheduled for", "autopay scheduled", "upcoming debit", "due on", "will be processed",
-            "not yet completed", "payment is pending", "mandate payment will"
+            "not yet completed", "payment is pending", "mandate payment will", "will be charged"
         ).any { lower.contains(it) }
         val completed = listOf(
-            "has been debited", "successfully debited", "debited from", "payment successful",
+            "has been debited", "successfully debited", "was debited", "payment successful",
             "paid successfully", "transaction successful", "completed successfully", "has been paid"
         ).any { lower.contains(it) }
         if (future && !completed) {
             return decision("pending", 1.0, "hard_gate", "pending", 1.0, "future/scheduled debit")
         }
 
+        // Some providers send a reversal/failure notice even though no cash refund was credited.
+        // Example: a SIP purchase reversed because of insufficient balance. Treat this as no cash movement.
+        val reversedOrFailed = listOf(
+            "reversed", "reversal", "transaction failed", "payment failed", "unsuccessful",
+            "declined", "insufficient balance", "insufficient funds", "er04"
+        ).any { lower.contains(it) }
+        val explicitCreditBack = listOf(
+            "credited back", "refund credited", "amount credited", "credited to your account",
+            "returned to your account", "refund has been credited"
+        ).any { lower.contains(it) }
+        if (reversedOrFailed && !explicitCreditBack) {
+            return decision("ignore", 1.0, "hard_gate", "ignore", 1.0, "failed/reversed transaction with no confirmed cash credit")
+        }
+
+        val creditCardBillPayment =
+            lower.contains("credit card") && (
+                (lower.contains("payment of") && lower.contains("has been received")) ||
+                lower.contains("payment received towards") ||
+                lower.contains("payment received for") ||
+                lower.contains("credit card payment received") ||
+                lower.contains("received towards your") ||
+                (lower.contains("thank you for your payment") && lower.contains("card")) ||
+                lower.contains("card bill payment successful")
+            )
+        if (creditCardBillPayment) {
+            return decision("transfer", 0.995, "hard_gate", "transfer", 1.0, "credit-card bill payment")
+        }
+
         return null
     }
 
     private fun contextOverride(lower: String, neural: NeuralPrediction): HybridDecision? {
-        if (listOf("refund", "refunded", "reversal", "reversed", "credited back", "returned to your account")
-                .any { lower.contains(it) }) {
-            return decision("refund", 0.99, "context_override", neural.label, neural.confidence, "refund/reversal context")
+        val completedRefund = listOf(
+            "refunded", "refund credited", "refund has been credited", "credited back",
+            "returned to your account", "refund successful", "amount refunded"
+        ).any { lower.contains(it) }
+        if (completedRefund) {
+            return decision("refund", 0.99, "context_override", neural.label, neural.confidence, "confirmed refund/credit-back context")
         }
 
         if (listOf("self transfer", "own account", "between your accounts", "internal transfer", "moved between your accounts")

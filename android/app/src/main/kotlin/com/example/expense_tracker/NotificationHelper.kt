@@ -22,7 +22,7 @@ object NotificationHelper {
             if (nm.getNotificationChannel(channelId) == null) {
                 nm.createNotificationChannel(
                     NotificationChannel(channelId, "Expense Tracker", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                        description = "Transaction and daily summary notifications"
+                        description = "Transaction, review and daily summary notifications"
                     }
                 )
             }
@@ -37,7 +37,21 @@ object NotificationHelper {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) Notification.Builder(context, channelId)
         else Notification.Builder(context)
 
-    fun showTransaction(context: Context, tx: ParsedTransaction) {
+    private fun action(context: Context, txId: Long, action: String, label: String, requestCode: Int): Notification.Action {
+        val intent = Intent(context, NotificationActionReceiver::class.java).apply {
+            putExtra("transaction_id", txId)
+            putExtra("tx_action", action)
+        }
+        val pending = PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return Notification.Action.Builder(0, label, pending).build()
+    }
+
+    fun showTransaction(context: Context, tx: ParsedTransaction, transactionId: Long) {
         ensureChannel(context)
         if (!canNotify(context)) return
         val open = PendingIntent.getActivity(
@@ -48,14 +62,23 @@ object NotificationHelper {
         )
         val sign = if (tx.type == "income" || tx.type == "refund") "+" else "-"
         val note = if (tx.note.isBlank()) "" else " • ${tx.note}"
-        val notification = builder(context)
+        val title = if (tx.reviewStatus == "needs_review") "Review: ${tx.merchant}" else tx.merchant
+        val text = "$sign₹${"%.2f".format(tx.amount)} • ${tx.category}$note"
+        val base = builder(context)
             .setSmallIcon(android.R.drawable.stat_notify_more)
-            .setContentTitle(tx.merchant)
-            .setContentText("$sign₹${"%.2f".format(tx.amount)} • ${tx.category}$note")
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setContentIntent(open)
             .setAutoCancel(true)
-            .build()
-        manager(context).notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), notification)
+        if (transactionId > 0L && tx.type != "income" && tx.type != "refund") {
+            val seed = (transactionId % 100000).toInt() * 10
+            base.addAction(action(context, transactionId, "food", "Food", seed + 1))
+            base.addAction(action(context, transactionId, "shopping", "Shopping", seed + 2))
+            base.addAction(action(context, transactionId, "transfer", "Transfer", seed + 3))
+            base.addAction(action(context, transactionId, "ignore", "Ignore", seed + 4))
+        }
+        manager(context).notify((System.currentTimeMillis() % Int.MAX_VALUE).toInt(), base.build())
     }
 
     fun showBudgetAlert(context: Context, title: String, text: String) {

@@ -4,9 +4,11 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'app_db.dart';
 import 'models.dart';
 import 'native_bridge.dart';
+import 'enhancements.dart';
 
 const txTypes = ['expense', 'investment', 'income', 'transfer', 'refund'];
 final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
+final moneyExact = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 2);
 final dateTimeFmt = DateFormat('dd MMM, h:mm a');
 
 void main() {
@@ -18,10 +20,26 @@ void main() {
 Future<void> _initializeServices() async {
   try {
     await AppDb.instance.initialize();
+    final cleanupDone = await AppDb.instance.getBoolSetting('classifier_cleanup_v14_done', fallback: false);
+    if (!cleanupDone) {
+      try {
+        await NativeBridge.reclassifyStoredSms();
+        await AppDb.instance.setSetting('classifier_cleanup_v14_done', '1');
+      } catch (e) {
+        debugPrint('Stored SMS cleanup skipped: $e');
+      }
+    }
     final enabled = await AppDb.instance.getBoolSetting('daily_summary_enabled', fallback: true);
     final hour = int.tryParse(await AppDb.instance.getSetting('daily_summary_hour', fallback: '21')) ?? 21;
     final minute = int.tryParse(await AppDb.instance.getSetting('daily_summary_minute', fallback: '0')) ?? 0;
     await NativeBridge.scheduleDailySummary(enabled: enabled, hour: hour, minute: minute);
+    await loadEnhancedPreferences();
+    await AppDb.instance.normalizeExistingMerchants();
+    await AppDb.instance.syncAccountsFromTransactions();
+    await AppDb.instance.matchTransfers();
+    await AppDb.instance.smartDeduplicate();
+    await runDailySmartAlerts();
+    try { await NativeBridge.updateHomeWidget(); } catch (_) {}
   } catch (e, stack) {
     debugPrint('Startup initialization failed: $e');
     debugPrintStack(stackTrace: stack);
@@ -31,93 +49,58 @@ Future<void> _initializeServices() async {
 class ExpenseTrackerApp extends StatelessWidget {
   const ExpenseTrackerApp({super.key});
 
+  ThemeData _theme(Brightness brightness) {
+    const seed = Color(0xFF0C9A62);
+    final dark = brightness == Brightness.dark;
+    final scheme = ColorScheme.fromSeed(seedColor: seed, brightness: brightness);
+    final bg = dark ? const Color(0xFF101613) : const Color(0xFFF4F7F5);
+    final surface = dark ? const Color(0xFF18211C) : Colors.white;
+    final border = dark ? const Color(0xFF34423A) : const Color(0xFFE2E9E5);
+    final muted = dark ? const Color(0xFFB3BEB7) : const Color(0xFF66736B);
+    return ThemeData(
+      useMaterial3: true,
+      brightness: brightness,
+      colorScheme: scheme,
+      scaffoldBackgroundColor: bg,
+      splashFactory: InkSparkle.splashFactory,
+      appBarTheme: AppBarTheme(backgroundColor: bg, surfaceTintColor: Colors.transparent, elevation: 0, centerTitle: false),
+      cardTheme: CardThemeData(color: surface, surfaceTintColor: Colors.transparent, elevation: 0, margin: EdgeInsets.zero, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22))),
+      navigationBarTheme: NavigationBarThemeData(
+        height: 72,
+        backgroundColor: surface,
+        elevation: 4,
+        indicatorColor: dark ? const Color(0xFF174A35) : const Color(0xFFE0F5E9),
+        indicatorShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        labelTextStyle: WidgetStateProperty.resolveWith((states) => TextStyle(fontSize: 11, fontWeight: states.contains(WidgetState.selected) ? FontWeight.w800 : FontWeight.w600, color: states.contains(WidgetState.selected) ? scheme.primary : muted)),
+        iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(size: 23, color: states.contains(WidgetState.selected) ? scheme.primary : muted)),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: surface,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: border)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: scheme.primary, width: 1.7)),
+      ),
+      filledButtonTheme: FilledButtonThemeData(style: FilledButton.styleFrom(minimumSize: const Size(0, 52), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), textStyle: const TextStyle(fontWeight: FontWeight.w800))),
+      outlinedButtonTheme: OutlinedButtonThemeData(style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52), side: BorderSide(color: border), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), textStyle: const TextStyle(fontWeight: FontWeight.w800))),
+      chipTheme: ChipThemeData(backgroundColor: surface, selectedColor: dark ? const Color(0xFF174A35) : const Color(0xFFE0F5E9), side: BorderSide(color: border), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), labelStyle: const TextStyle(fontWeight: FontWeight.w700)),
+      dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    const seed = Color(0xFF0C9A62);
-    final scheme = ColorScheme.fromSeed(
-      seedColor: seed,
-      brightness: Brightness.light,
-      surface: const Color(0xFFFBFCFB),
-    );
-
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Expense Tracker',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: scheme,
-        scaffoldBackgroundColor: const Color(0xFFF4F7F5),
-        splashFactory: InkSparkle.splashFactory,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFF4F7F5),
-          surfaceTintColor: Colors.transparent,
-          elevation: 0,
-          centerTitle: false,
-          titleTextStyle: TextStyle(
-            color: Color(0xFF15211A),
-            fontSize: 20,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        cardTheme: CardThemeData(
-          color: Colors.white,
-          surfaceTintColor: Colors.transparent,
-          elevation: 0,
-          margin: EdgeInsets.zero,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
-        ),
-        navigationBarTheme: NavigationBarThemeData(
-          height: 72,
-          backgroundColor: Colors.white,
-          elevation: 4,
-          shadowColor: Colors.black.withValues(alpha: .07),
-          indicatorColor: const Color(0xFFE0F5E9),
-          indicatorShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          labelTextStyle: WidgetStateProperty.resolveWith((states) => TextStyle(
-                fontSize: 11,
-                fontWeight: states.contains(WidgetState.selected) ? FontWeight.w800 : FontWeight.w600,
-                color: states.contains(WidgetState.selected) ? const Color(0xFF087849) : const Color(0xFF66736B),
-              )),
-          iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(
-                size: 23,
-                color: states.contains(WidgetState.selected) ? const Color(0xFF087849) : const Color(0xFF768078),
-              )),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-          labelStyle: const TextStyle(color: Color(0xFF5D6A62)),
-          hintStyle: const TextStyle(color: Color(0xFF98A29B)),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFFE3EAE6))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: seed, width: 1.7)),
-        ),
-        filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-            minimumSize: const Size(0, 52),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            textStyle: const TextStyle(fontWeight: FontWeight.w800),
-          ),
-        ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            minimumSize: const Size(0, 52),
-            side: const BorderSide(color: Color(0xFFDDE5E0)),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            textStyle: const TextStyle(fontWeight: FontWeight.w800),
-          ),
-        ),
-        chipTheme: ChipThemeData(
-          backgroundColor: Colors.white,
-          selectedColor: const Color(0xFFE0F5E9),
-          side: const BorderSide(color: Color(0xFFE2E9E5)),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-          labelStyle: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        dividerTheme: const DividerThemeData(color: Color(0xFFEDF1EF), thickness: 1, space: 1),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: expenseThemeMode,
+      builder: (context, mode, _) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Expense Tracker',
+        theme: _theme(Brightness.light),
+        darkTheme: _theme(Brightness.dark),
+        themeMode: mode,
+        home: const AppLockGate(child: HomeShell()),
       ),
-      home: const HomeShell(),
     );
   }
 }
@@ -307,6 +290,28 @@ class HomePage extends StatelessWidget {
                   const SizedBox(width: 10),
                   Expanded(child: QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Budget', caption: 'Set limits', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); onChanged(); })),
                 ],
+              ),
+              const SizedBox(height: 12),
+              Material(
+                color: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: .55),
+                borderRadius: BorderRadius.circular(22),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(22),
+                  onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EnhancementHubPage())),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Row(children: [
+                      CircleAvatar(backgroundColor: Theme.of(context).colorScheme.primary, foregroundColor: Colors.white, child: const Icon(Icons.auto_awesome_rounded)),
+                      const SizedBox(width: 12),
+                      const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Text('Smart Finance Hub', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                        SizedBox(height: 3),
+                        Text('Transfers, subscriptions, receipt scan, backup, net worth and more'),
+                      ])),
+                      const Icon(Icons.chevron_right_rounded),
+                    ]),
+                  ),
+                ),
               ),
               const SizedBox(height: 24),
               SectionHeader(title: 'Recent activity', subtitle: recent.isEmpty ? 'Your latest transactions will appear here' : '${recent.length} most recent', actionLabel: 'View all', onAction: () => onNavigate(1)),
@@ -540,7 +545,7 @@ class _TransactionDetailsPageState extends State<TransactionDetailsPage> {
                       ),
                     ),
                     Text(
-                      '${tx.type == 'income' || tx.type == 'refund' ? '+' : '-'}${money.format(tx.amount)}',
+                      '${tx.type == 'income' || tx.type == 'refund' ? '+' : '-'}${moneyExact.format(tx.amount)}',
                       style: TextStyle(
                         color: typeColor,
                         fontSize: 22,
@@ -566,7 +571,7 @@ class _TransactionDetailsPageState extends State<TransactionDetailsPage> {
           _DetailSection(
             title: 'Payment details',
             children: [
-              _detailRow('Amount', money.format(tx.amount)),
+              _detailRow('Amount', moneyExact.format(tx.amount)),
               _detailRow('Type', titleCase(tx.type)),
               _detailRow('Category', tx.category),
               _detailRow('Source', sourceName),
@@ -623,6 +628,17 @@ class _TransactionDetailsPageState extends State<TransactionDetailsPage> {
             ),
           ],
           const SizedBox(height: 18),
+          if (tx.type == 'expense' && tx.id != null) ...[
+            OutlinedButton.icon(
+              onPressed: () async {
+                final changed = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => SplitTransactionPage(transaction: tx)));
+                if (changed == true && mounted) setState(() {});
+              },
+              icon: const Icon(Icons.call_split_rounded),
+              label: Text(tx.isSplitParent ? 'Edit split transaction' : 'Split transaction'),
+            ),
+            const SizedBox(height: 8),
+          ],
           OutlinedButton.icon(
             onPressed: _edit,
             icon: const Icon(Icons.edit_outlined),
@@ -1219,26 +1235,37 @@ class _ReportsPageState extends State<ReportsPage> {
             const SizedBox(height: 22),
             const SectionHeader(title: 'Where your money went', subtitle: 'Largest spending signals for the selected period'),
             const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: _InsightCard(
-                    title: 'Top category',
-                    value: topCategory?.key ?? 'No data',
-                    amount: topCategory == null ? '—' : money.format(topCategory.value),
-                    icon: Icons.category_outlined,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _InsightCard(
-                    title: 'Top merchant',
-                    value: topMerchant?.key ?? 'No data',
-                    amount: topMerchant == null ? '—' : money.format(topMerchant.value),
-                    icon: Icons.storefront_outlined,
-                  ),
-                ),
-              ],
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final categoryCard = _InsightCard(
+                  title: 'Top category',
+                  value: topCategory?.key ?? 'No data',
+                  amount: topCategory == null ? '—' : money.format(topCategory.value),
+                  icon: Icons.category_outlined,
+                );
+                final merchantCard = _InsightCard(
+                  title: 'Top merchant',
+                  value: topMerchant?.key ?? 'No data',
+                  amount: topMerchant == null ? '—' : money.format(topMerchant.value),
+                  icon: Icons.storefront_outlined,
+                );
+                if (constraints.maxWidth < 520) {
+                  return Column(
+                    children: [
+                      categoryCard,
+                      const SizedBox(height: 10),
+                      merchantCard,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: categoryCard),
+                    const SizedBox(width: 10),
+                    Expanded(child: merchantCard),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 10),
             _InsightCard(
@@ -1375,42 +1402,54 @@ class _InsightCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Container(
+        width: double.infinity,
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(22),
           border: Border.all(color: const Color(0xFFE4EBE7)),
         ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                color: const Color(0xFFEAF7F0),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Icon(icon, color: const Color(0xFF0A8B56), size: 22),
-            ),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: const TextStyle(fontSize: 11.5, color: Color(0xFF7B8780), fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 3),
-                  Text(
-                    value,
-                    maxLines: wide ? 2 : 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF202C25)),
+            Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF7F0),
+                    borderRadius: BorderRadius.circular(14),
                   ),
-                ],
+                  child: Icon(icon, color: const Color(0xFF0A8B56), size: 22),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Color(0xFF7B8780), fontWeight: FontWeight.w800),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 13),
+            Text(
+              value,
+              maxLines: wide ? 2 : 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: Color(0xFF202C25)),
+            ),
+            const SizedBox(height: 5),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                amount,
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF0A8B56)),
               ),
             ),
-            const SizedBox(width: 8),
-            Text(amount, style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0A8B56))),
           ],
         ),
       );
@@ -1585,7 +1624,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool smsPermission = false;
   bool smsHistoryPermission = false;
   bool importingHistory = false;
+  bool reclassifyingSms = false;
   String historyStatus = 'Optional: scan older bank/payment SMS already on this phone';
+  String reclassifyStatus = 'Re-check imported SMS with the latest safety rules';
   bool phonePeEnabled = false;
   bool notificationAccess = false;
   bool hybridClassifier = true;
@@ -1683,6 +1724,32 @@ class _SettingsPageState extends State<SettingsPage> {
     }
   }
 
+  Future<void> reclassifyExistingSms() async {
+    if (mounted) {
+      setState(() {
+        reclassifyingSms = true;
+        reclassifyStatus = 'Re-checking stored SMS transactions…';
+      });
+    }
+    try {
+      final result = await NativeBridge.reclassifyStoredSms();
+      if (!mounted) return;
+      setState(() {
+        reclassifyStatus =
+            'Checked ${result.checked} · updated ${result.updated} · removed from reports ${result.ignored} · unchanged ${result.unchanged}';
+      });
+      widget.onChanged();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Reclassified ${result.checked} stored SMS transactions.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => reclassifyStatus = 'Reclassification failed: $e');
+    } finally {
+      if (mounted) setState(() => reclassifyingSms = false);
+    }
+  }
+
   Future<void> saveSummary() async {
     await AppDb.instance.setSetting('daily_summary_enabled', summary ? '1' : '0');
     await AppDb.instance.setSetting('daily_summary_hour', '${summaryTime.hour}');
@@ -1737,6 +1804,20 @@ class _SettingsPageState extends State<SettingsPage> {
                       child: Text(smsHistoryPermission ? 'Import again' : 'Allow'),
                     ),
               onTap: importingHistory ? null : importPreviousSms,
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.rule_rounded),
+              title: const Text('Reclassify existing SMS'),
+              subtitle: Text(reclassifyStatus),
+              trailing: reclassifyingSms
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    )
+                  : const Icon(Icons.chevron_right_rounded),
+              onTap: reclassifyingSms ? null : reclassifyExistingSms,
             ),
             const Divider(),
             SwitchListTile(
@@ -1794,7 +1875,7 @@ class _SettingsPageState extends State<SettingsPage> {
             const ListTile(
               leading: Icon(Icons.offline_bolt_outlined),
               title: Text('Model runs fully on device'),
-              subtitle: Text('No SMS or notification text is sent to a server. Low-confidence messages are ignored instead of auto-saved.'),
+              subtitle: Text('No SMS or notification text is sent to a server. Low-confidence financial messages go to Needs Review instead of being silently trusted.'),
             ),
           ],
         ),
@@ -1827,6 +1908,13 @@ class _SettingsPageState extends State<SettingsPage> {
               title: const Text('Budgets'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())),
+            ),
+            ListTile(
+              leading: const Icon(Icons.auto_awesome_rounded),
+              title: const Text('Smart Finance Hub'),
+              subtitle: const Text('Transfers, recurring payments, search, receipts, backup, net worth'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const EnhancementHubPage())),
             ),
           ],
         ),
@@ -1880,13 +1968,19 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         ),
         const SizedBox(height: 14),
-        const SettingsBox(
-          title: 'Privacy',
+        SettingsBox(
+          title: 'Privacy & appearance',
           children: [
-            ListTile(
+            const ListTile(
               leading: Icon(Icons.lock_outline),
               title: Text('Local-only by default'),
-              subtitle: Text('SMS, PhonePe notification text, notes, transactions and budgets remain on this device. No backend is used.'),
+              subtitle: Text('SMS, PhonePe notification text, notes, receipts, transactions and ML decisions remain on this device unless you explicitly export them.'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.fingerprint),
+              title: const Text('Biometric lock, secure preview & dark mode'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PrivacyAppearancePage())),
             ),
           ],
         ),
@@ -2103,7 +2197,11 @@ class MetricCard extends StatelessWidget {
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text(title, style: const TextStyle(color: Color(0xFF7A877F), fontSize: 12.5, fontWeight: FontWeight.w600)),
               const SizedBox(height: 3),
-              Text(value, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF18241D))),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(value, maxLines: 1, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF18241D))),
+              ),
             ])),
           ],
         ),

@@ -21,10 +21,11 @@ class PhonePeNotificationListener : NotificationListenerService() {
         val parsed = TransactionParser.parsePhonePeNotification(db, title, body, item.postTime) ?: return
         val inserted = db.insertTransaction(parsed, "phonepe_notification")
         if (inserted > 0) {
-            BudgetGuard.check(applicationContext, db, parsed)
+            if (parsed.reviewStatus == "accepted") BudgetGuard.check(applicationContext, db, parsed)
+            ExpenseWidgetProvider.refresh(applicationContext)
         }
         if (inserted > 0 && db.getSetting("notifications_enabled", "1") == "1") {
-            NotificationHelper.showTransaction(applicationContext, parsed)
+            NotificationHelper.showTransaction(applicationContext, parsed, inserted)
         }
     }
 }

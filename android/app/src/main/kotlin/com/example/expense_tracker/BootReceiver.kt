@@ -13,5 +13,6 @@ class BootReceiver : BroadcastReceiver() {
             val minute = db.getSetting("daily_summary_minute", "0").toIntOrNull() ?: 0
             SummaryScheduler.scheduleNext(context, hour, minute)
         }
+        ExpenseWidgetProvider.refresh(context.applicationContext)
     }
 }

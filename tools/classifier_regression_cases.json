@@ -1,0 +1,17 @@
+{
+  "version": "v14",
+  "cases": [
+    {
+      "name": "credit_card_bill_payment",
+      "sms": "Payment of INR 29362.78 has been received towards your Axis Bank Credit Card XX1523 on 05-10-26 - Axis Bank",
+      "expected_type": "transfer",
+      "expected_category": "Credit Card Payment",
+      "expected_review_status": "accepted"
+    },
+    {
+      "name": "explicit_spam_stock_tip",
+      "sms": "Airtel Warning: SPAM | TATAMOTORS option chain metrics signal clean upside expansion; active stock guild credited Rs 8600 to 918989106607. http://fbiem.fintudos.com/jax",
+      "expected": "ignore"
+    }
+  ]
+}
