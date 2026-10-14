@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'app_db.dart';
 import 'models.dart';
 import 'native_bridge.dart';
@@ -313,7 +314,21 @@ class HomePage extends StatelessWidget {
               if (recent.isEmpty)
                 const EmptyCard(text: 'No transactions yet. Turn on SMS or PhonePe tracking in Settings, or add one manually.')
               else
-                ...recent.map((t) => Padding(padding: const EdgeInsets.only(bottom: 10), child: TransactionTile(tx: t))),
+                ...recent.map(
+                  (t) => Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: TransactionTile(
+                      tx: t,
+                      onTap: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => TransactionDetailsPage(transaction: t)),
+                        );
+                        onChanged();
+                      },
+                    ),
+                  ),
+                ),
             ],
           ),
         );
@@ -361,10 +376,29 @@ class _TransactionsPageState extends State<TransactionsPage> {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
             children: ['all', ...txTypes]
-                .map((t) => Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(label: Text(titleCase(t)), selected: filter == t, onSelected: (_) => setState(() => filter = t)),
-                    ))
+                .map((t) {
+                  final selected = filter == t;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ChoiceChip(
+                      label: Text(titleCase(t)),
+                      selected: selected,
+                      onSelected: (_) => setState(() => filter = t),
+                      showCheckmark: true,
+                      checkmarkColor: const Color(0xFF087849),
+                      selectedColor: const Color(0xFFDDF5E9),
+                      backgroundColor: Colors.white,
+                      labelStyle: TextStyle(
+                        color: selected ? const Color(0xFF087849) : const Color(0xFF3F4A43),
+                        fontWeight: FontWeight.w800,
+                      ),
+                      side: BorderSide(
+                        color: selected ? const Color(0xFFB7E5CD) : const Color(0xFFD7DFDA),
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    ),
+                  );
+                })
                 .toList(),
           ),
         ),
@@ -386,7 +420,10 @@ class _TransactionsPageState extends State<TransactionsPage> {
                     child: TransactionTile(
                       tx: tx,
                       onTap: () async {
-                        await editTransaction(context, tx);
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (_) => TransactionDetailsPage(transaction: tx)),
+                        );
                         if (mounted) setState(() {});
                         widget.onChanged();
                       },
@@ -400,6 +437,271 @@ class _TransactionsPageState extends State<TransactionsPage> {
       ],
     );
   }
+}
+
+
+class TransactionDetailsPage extends StatefulWidget {
+  final TxRecord transaction;
+  const TransactionDetailsPage({super.key, required this.transaction});
+
+  @override
+  State<TransactionDetailsPage> createState() => _TransactionDetailsPageState();
+}
+
+class _TransactionDetailsPageState extends State<TransactionDetailsPage> {
+  late TxRecord tx;
+
+  @override
+  void initState() {
+    super.initState();
+    tx = widget.transaction;
+  }
+
+  Future<void> _edit() async {
+    await editTransaction(context, tx);
+    if (tx.id == null) return;
+    final updated = await AppDb.instance.transactionById(tx.id!);
+    if (!mounted) return;
+    if (updated == null) {
+      Navigator.pop(context, true);
+      return;
+    }
+    setState(() => tx = updated);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final typeColor = _transactionTypeColor(tx.type);
+    final sourceName = sourceLabel(tx.source);
+    final rawLabel = tx.source == 'sms'
+        ? 'Full SMS message'
+        : tx.source == 'phonepe_notification'
+            ? 'Full PhonePe notification'
+            : 'Raw transaction response';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Transaction details'),
+        actions: [
+          IconButton(
+            tooltip: 'Edit',
+            onPressed: _edit,
+            icon: const Icon(Icons.edit_outlined),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(18, 8, 18, 32),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(22),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(26),
+              border: Border.all(color: const Color(0xFFE4EBE7)),
+              boxShadow: const [
+                BoxShadow(color: Color(0x0B000000), blurRadius: 20, offset: Offset(0, 8)),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        color: typeColor.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Icon(iconFor(tx.category), color: typeColor),
+                    ),
+                    const SizedBox(width: 13),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            tx.merchant,
+                            style: const TextStyle(
+                              fontSize: 21,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF18231D),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)),
+                            style: const TextStyle(color: Color(0xFF758078)),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      '${tx.type == 'income' || tx.type == 'refund' ? '+' : '-'}${money.format(tx.amount)}',
+                      style: TextStyle(
+                        color: typeColor,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _detailChip(titleCase(tx.type), typeColor),
+                    _detailChip(tx.category, const Color(0xFF4B5A51)),
+                    _detailChip(sourceName, const Color(0xFF2879E0)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          _DetailSection(
+            title: 'Payment details',
+            children: [
+              _detailRow('Amount', money.format(tx.amount)),
+              _detailRow('Type', titleCase(tx.type)),
+              _detailRow('Category', tx.category),
+              _detailRow('Source', sourceName),
+              if (tx.paymentMethod.isNotEmpty) _detailRow('Payment method', tx.paymentMethod),
+              if (tx.sender.isNotEmpty) _detailRow('SMS sender', tx.sender),
+              if (tx.accountHint.isNotEmpty) _detailRow('Account / card', '•••• ${tx.accountHint}'),
+              if (tx.upiReference.isNotEmpty) _detailRow('UPI / reference', tx.upiReference),
+              if (tx.source == 'sms' || tx.source == 'phonepe_notification')
+                _detailRow(
+                  'Classification',
+                  '${classifierLabel(tx.classificationMethod)} · ${(tx.classificationConfidence * 100).round()}%',
+                ),
+            ],
+          ),
+          if (tx.note.trim().isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _DetailSection(
+              title: 'Note',
+              children: [
+                SelectableText(
+                  tx.note,
+                  style: const TextStyle(
+                    color: Color(0xFF344139),
+                    fontSize: 15,
+                    height: 1.45,
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (tx.rawMessage.trim().isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _DetailSection(
+              title: rawLabel,
+              children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(15),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F8F6),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFE1E8E4)),
+                  ),
+                  child: SelectableText(
+                    tx.rawMessage,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      height: 1.5,
+                      color: Color(0xFF2E3932),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 18),
+          OutlinedButton.icon(
+            onPressed: _edit,
+            icon: const Icon(Icons.edit_outlined),
+            label: const Text('Edit transaction'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  static Widget _detailChip(String text, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: .09),
+          borderRadius: BorderRadius.circular(99),
+          border: Border.all(color: color.withValues(alpha: .18)),
+        ),
+        child: Text(
+          text,
+          style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w800),
+        ),
+      );
+
+  static Widget _detailRow(String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 118,
+              child: Text(
+                label,
+                style: const TextStyle(color: Color(0xFF7A857E), fontSize: 13),
+              ),
+            ),
+            Expanded(
+              child: SelectableText(
+                value,
+                style: const TextStyle(
+                  color: Color(0xFF253129),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13.5,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+}
+
+class _DetailSection extends StatelessWidget {
+  final String title;
+  final List<Widget> children;
+  const _DetailSection({required this.title, required this.children});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: const Color(0xFFE4EBE7)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                fontWeight: FontWeight.w900,
+                fontSize: 16,
+                color: Color(0xFF1E2A23),
+              ),
+            ),
+            const SizedBox(height: 10),
+            ...children,
+          ],
+        ),
+      );
 }
 
 class PayUpiPage extends StatefulWidget {
@@ -417,6 +719,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
   final note = TextEditingController();
   String category = 'Uncategorized';
   bool paying = false;
+  bool scannedQr = false;
 
   @override
   void dispose() {
@@ -425,6 +728,28 @@ class _PayUpiPageState extends State<PayUpiPage> {
     amount.dispose();
     note.dispose();
     super.dispose();
+  }
+
+  Future<void> scanQr() async {
+    final result = await Navigator.push<UpiQrData>(
+      context,
+      MaterialPageRoute(builder: (_) => const UpiQrScannerPage()),
+    );
+    if (!mounted || result == null) return;
+
+    setState(() {
+      upi.text = result.upiId;
+      if (result.payeeName.isNotEmpty) payee.text = result.payeeName;
+      if (result.amount != null && result.amount! > 0) {
+        amount.text = result.amount!.toStringAsFixed(2);
+      }
+      if (result.note.isNotEmpty) note.text = result.note;
+      scannedQr = true;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('UPI QR scanned. Review the details before paying.')),
+    );
   }
 
   Future<void> pay() async {
@@ -456,6 +781,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment saved with your note.')));
         amount.clear();
         note.clear();
+        setState(() => scannedQr = false);
         widget.onChanged();
       } else {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment not confirmed (${result.status}). Nothing was saved.')));
@@ -477,11 +803,74 @@ class _PayUpiPageState extends State<PayUpiPage> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(18, 18, 18, 104),
           children: [
-            const PageHeader(title: 'Pay with UPI', subtitle: 'Your note is saved locally before PhonePe opens'),
+            const PageHeader(title: 'Pay with UPI', subtitle: 'Scan a UPI QR or enter payment details manually'),
             const SizedBox(height: 16),
-            Center(child: Image.asset('assets/logo.png', width: 96, height: 96)),
+            Container(
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF08794D), Color(0xFF12A866)],
+                ),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: const [BoxShadow(color: Color(0x2608794D), blurRadius: 24, offset: Offset(0, 10))],
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 54,
+                        height: 54,
+                        decoration: BoxDecoration(color: Colors.white.withValues(alpha: .16), borderRadius: BorderRadius.circular(17)),
+                        child: const Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 30),
+                      ),
+                      const SizedBox(width: 14),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Scan UPI QR', style: TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w900)),
+                            SizedBox(height: 3),
+                            Text('PhonePe, GPay, Paytm or any standard UPI QR', style: TextStyle(color: Color(0xFFD9F8E8), fontSize: 12.5, height: 1.3)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF087849),
+                      ),
+                      onPressed: paying ? null : scanQr,
+                      icon: const Icon(Icons.center_focus_strong_rounded),
+                      label: Text(scannedQr ? 'Scan another QR' : 'Open QR scanner'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
             const SizedBox(height: 18),
-            TextField(controller: upi, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Recipient UPI ID', hintText: 'name@bank')),
+            Row(
+              children: [
+                const Expanded(child: Divider()),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Text(
+                    scannedQr ? 'REVIEW SCANNED DETAILS' : 'OR ENTER MANUALLY',
+                    style: const TextStyle(fontSize: 10.5, letterSpacing: .8, color: Color(0xFF77827B), fontWeight: FontWeight.w900),
+                  ),
+                ),
+                const Expanded(child: Divider()),
+              ],
+            ),
+            const SizedBox(height: 16),
+            TextField(controller: upi, keyboardType: TextInputType.emailAddress, decoration: const InputDecoration(labelText: 'Recipient UPI ID', hintText: 'name@bank', prefixIcon: Icon(Icons.alternate_email_rounded))),
             const SizedBox(height: 12),
             TextField(controller: payee, decoration: const InputDecoration(labelText: 'Payee name', hintText: 'Person or merchant')),
             const SizedBox(height: 12),
@@ -514,13 +903,228 @@ class _PayUpiPageState extends State<PayUpiPage> {
   }
 }
 
-class ReportsPage extends StatelessWidget {
+
+class UpiQrData {
+  final String upiId;
+  final String payeeName;
+  final double? amount;
+  final String note;
+  final String transactionRef;
+  final String raw;
+
+  const UpiQrData({
+    required this.upiId,
+    required this.payeeName,
+    required this.amount,
+    required this.note,
+    required this.transactionRef,
+    required this.raw,
+  });
+
+  static UpiQrData? parse(String raw) {
+    final value = raw.trim();
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.scheme.toLowerCase() != 'upi' || uri.host.toLowerCase() != 'pay') {
+      return null;
+    }
+
+    final upiId = (uri.queryParameters['pa'] ?? '').trim();
+    if (upiId.isEmpty || !upiId.contains('@')) return null;
+
+    final amountText = (uri.queryParameters['am'] ?? '').replaceAll(',', '').trim();
+    final parsedAmount = amountText.isEmpty ? null : double.tryParse(amountText);
+
+    return UpiQrData(
+      upiId: upiId,
+      payeeName: (uri.queryParameters['pn'] ?? '').trim(),
+      amount: parsedAmount,
+      note: (uri.queryParameters['tn'] ?? '').trim(),
+      transactionRef: (uri.queryParameters['tr'] ?? '').trim(),
+      raw: value,
+    );
+  }
+}
+
+class UpiQrScannerPage extends StatefulWidget {
+  const UpiQrScannerPage({super.key});
+
+  @override
+  State<UpiQrScannerPage> createState() => _UpiQrScannerPageState();
+}
+
+class _UpiQrScannerPageState extends State<UpiQrScannerPage> {
+  final MobileScannerController controller = MobileScannerController(
+    formats: const [BarcodeFormat.qrCode],
+    detectionSpeed: DetectionSpeed.noDuplicates,
+  );
+  bool handled = false;
+  String? errorMessage;
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleCapture(BarcodeCapture capture) async {
+    if (handled) return;
+    String? raw;
+    for (final barcode in capture.barcodes) {
+      final value = barcode.rawValue?.trim();
+      if (value != null && value.isNotEmpty) {
+        raw = value;
+        break;
+      }
+    }
+    if (raw == null) return;
+
+    final data = UpiQrData.parse(raw);
+    if (data == null) {
+      setState(() => errorMessage = 'This is not a valid UPI payment QR. Scan a QR containing a UPI payment address.');
+      return;
+    }
+
+    handled = true;
+    await controller.stop();
+    if (!mounted) return;
+    Navigator.pop(context, data);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        title: const Text('Scan UPI QR'),
+        actions: [
+          IconButton(
+            tooltip: 'Torch',
+            onPressed: controller.toggleTorch,
+            icon: const Icon(Icons.flashlight_on_rounded),
+          ),
+          IconButton(
+            tooltip: 'Switch camera',
+            onPressed: controller.switchCamera,
+            icon: const Icon(Icons.cameraswitch_rounded),
+          ),
+        ],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          MobileScanner(
+            controller: controller,
+            onDetect: _handleCapture,
+            errorBuilder: (context, error) => Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Camera unavailable: ${error.errorCode.name}',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
+          ),
+          IgnorePointer(
+            child: Center(
+              child: Container(
+                width: 255,
+                height: 255,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: const [BoxShadow(color: Color(0x77000000), blurRadius: 28, spreadRadius: 8)],
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            left: 24,
+            right: 24,
+            bottom: 34,
+            child: SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: .72),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white24),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      errorMessage ?? 'Place the merchant UPI QR inside the frame. Payment details will be shown for review before anything is paid.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: errorMessage == null ? Colors.white : const Color(0xFFFFB4AB),
+                        height: 1.35,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (errorMessage != null) ...[
+                      const SizedBox(height: 10),
+                      TextButton(
+                        onPressed: () => setState(() => errorMessage = null),
+                        child: const Text('Try another QR'),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+class ReportsPage extends StatefulWidget {
   const ReportsPage({super.key});
 
-  Future<List<dynamic>> load() async => [
-        await AppDb.instance.monthTotalsByType(),
-        await AppDb.instance.monthExpenseByCategory(),
-      ];
+  @override
+  State<ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<ReportsPage> {
+  String period = 'month';
+  int year = DateTime.now().year;
+  int month = DateTime.now().month;
+
+  (int, int) _range() {
+    if (period == 'year') {
+      return (
+        DateTime(year, 1, 1).millisecondsSinceEpoch,
+        DateTime(year + 1, 1, 1).millisecondsSinceEpoch,
+      );
+    }
+    return (
+      DateTime(year, month, 1).millisecondsSinceEpoch,
+      DateTime(year, month + 1, 1).millisecondsSinceEpoch,
+    );
+  }
+
+  Future<List<dynamic>> load() async {
+    final range = _range();
+    return [
+      await AppDb.instance.availableYears(),
+      await AppDb.instance.totalsByTypeForPeriod(range.$1, range.$2),
+      await AppDb.instance.expenseByCategoryForPeriod(range.$1, range.$2),
+      await AppDb.instance.expenseByMerchantForPeriod(range.$1, range.$2),
+      await AppDb.instance.largestExpenseForPeriod(range.$1, range.$2),
+      await AppDb.instance.monthlyExpenseForYear(year),
+    ];
+  }
+
+  String get periodLabel => period == 'year'
+      ? '$year'
+      : DateFormat('MMMM yyyy').format(DateTime(year, month));
 
   @override
   Widget build(BuildContext context) {
@@ -528,52 +1132,360 @@ class ReportsPage extends StatelessWidget {
       future: load(),
       builder: (context, snap) {
         if (snap.hasError) return ErrorView(message: '${snap.error}');
-        if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final types = snap.data![0] as Map<String, double>;
-        final categories = snap.data![1] as Map<String, double>;
-        double max = 1;
-        for (final v in categories.values) {
-          if (v > max) max = v;
+        if (!snap.hasData) return const AppLoadingView(label: 'Building your reports');
+
+        final years = snap.data![0] as List<int>;
+        final types = snap.data![1] as Map<String, double>;
+        final categories = snap.data![2] as Map<String, double>;
+        final merchants = snap.data![3] as Map<String, double>;
+        final largest = snap.data![4] as TxRecord?;
+        final monthly = snap.data![5] as List<double>;
+
+        final topCategory = categories.isEmpty ? null : categories.entries.first;
+        final topMerchant = merchants.isEmpty ? null : merchants.entries.first;
+        final totalExpense = types['expense'] ?? 0;
+
+        double maxCategory = 1;
+        for (final value in categories.values) {
+          if (value > maxCategory) maxCategory = value;
         }
+
         return ListView(
           padding: const EdgeInsets.fromLTRB(18, 18, 18, 104),
           children: [
-            const PageHeader(title: 'Reports', subtitle: 'Current month'),
+            PageHeader(title: 'Reports', subtitle: periodLabel),
             const SizedBox(height: 16),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'month', label: Text('Monthly'), icon: Icon(Icons.calendar_view_month_rounded)),
+                ButtonSegment(value: 'year', label: Text('Yearly'), icon: Icon(Icons.calendar_today_rounded)),
+              ],
+              selected: {period},
+              onSelectionChanged: (value) => setState(() => period = value.first),
+              style: ButtonStyle(
+                textStyle: WidgetStateProperty.all(const TextStyle(fontWeight: FontWeight.w800)),
+              ),
+            ),
+            const SizedBox(height: 12),
             Row(
               children: [
-                Expanded(child: MetricCard(title: 'Expense', value: money.format(types['expense'] ?? 0), icon: Icons.south_east)),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    value: years.contains(year) ? year : years.first,
+                    decoration: const InputDecoration(labelText: 'Year'),
+                    items: years.map((value) => DropdownMenuItem(value: value, child: Text('$value'))).toList(),
+                    onChanged: (value) {
+                      if (value != null) setState(() => year = value);
+                    },
+                  ),
+                ),
+                if (period == 'month') ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: DropdownButtonFormField<int>(
+                      value: month,
+                      decoration: const InputDecoration(labelText: 'Month'),
+                      items: List.generate(
+                        12,
+                        (index) => DropdownMenuItem(
+                          value: index + 1,
+                          child: Text(DateFormat.MMMM().format(DateTime(2024, index + 1))),
+                        ),
+                      ),
+                      onChanged: (value) {
+                        if (value != null) setState(() => month = value);
+                      },
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(child: MetricCard(title: 'Expense', value: money.format(totalExpense), icon: Icons.south_east_rounded)),
                 const SizedBox(width: 10),
-                Expanded(child: MetricCard(title: 'Investment', value: money.format(types['investment'] ?? 0), icon: Icons.show_chart)),
+                Expanded(child: MetricCard(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west_rounded)),
               ],
             ),
             const SizedBox(height: 10),
             Row(
               children: [
-                Expanded(child: MetricCard(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west)),
+                Expanded(child: MetricCard(title: 'Investment', value: money.format(types['investment'] ?? 0), icon: Icons.show_chart_rounded)),
                 const SizedBox(width: 10),
-                Expanded(child: MetricCard(title: 'Refund', value: money.format(types['refund'] ?? 0), icon: Icons.replay)),
+                Expanded(child: MetricCard(title: 'Refund', value: money.format(types['refund'] ?? 0), icon: Icons.replay_rounded)),
               ],
             ),
             const SizedBox(height: 22),
-            const Text('Expense by category', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800)),
+            const SectionHeader(title: 'Where your money went', subtitle: 'Largest spending signals for the selected period'),
             const SizedBox(height: 12),
-            if (categories.isEmpty)
-              const EmptyCard(text: 'No expense data this month.')
+            Row(
+              children: [
+                Expanded(
+                  child: _InsightCard(
+                    title: 'Top category',
+                    value: topCategory?.key ?? 'No data',
+                    amount: topCategory == null ? '—' : money.format(topCategory.value),
+                    icon: Icons.category_outlined,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _InsightCard(
+                    title: 'Top merchant',
+                    value: topMerchant?.key ?? 'No data',
+                    amount: topMerchant == null ? '—' : money.format(topMerchant.value),
+                    icon: Icons.storefront_outlined,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            _InsightCard(
+              title: 'Largest single expense',
+              value: largest?.merchant ?? 'No expense found',
+              amount: largest == null ? '—' : money.format(largest.amount),
+              icon: Icons.receipt_long_outlined,
+              wide: true,
+            ),
+            const SizedBox(height: 22),
+            SectionHeader(
+              title: period == 'year' ? 'Monthly spending graph' : 'Expense by category',
+              subtitle: period == 'year'
+                  ? 'January to December $year'
+                  : 'Category distribution for $periodLabel',
+            ),
+            const SizedBox(height: 12),
+            if (period == 'year')
+              MonthlySpendChart(values: monthly)
+            else if (categories.isEmpty)
+              const EmptyCard(text: 'No expense data for this month.')
             else
-              ...categories.entries.map((e) => Padding(
-                    padding: const EdgeInsets.only(bottom: 14),
-                    child: Column(
-                      children: [
-                        Row(children: [Expanded(child: Text(e.key)), Text(money.format(e.value), style: const TextStyle(fontWeight: FontWeight.w700))]),
-                        const SizedBox(height: 7),
-                        ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: e.value / max, minHeight: 8)),
-                      ],
-                    ),
-                  )),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(color: const Color(0xFFE4EBE7)),
+                ),
+                child: Column(
+                  children: categories.entries.take(10).map((entry) {
+                    final ratio = maxCategory <= 0 ? 0.0 : entry.value / maxCategory;
+                    final share = totalExpense <= 0 ? 0 : ((entry.value / totalExpense) * 100).round();
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  entry.key,
+                                  style: const TextStyle(fontWeight: FontWeight.w800),
+                                ),
+                              ),
+                              Text(
+                                '${money.format(entry.value)} · $share%',
+                                style: const TextStyle(
+                                  color: Color(0xFF59675E),
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 7),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(20),
+                            child: LinearProgressIndicator(
+                              value: ratio.clamp(0.0, 1.0).toDouble(),
+                              minHeight: 9,
+                              backgroundColor: const Color(0xFFE9EFEB),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            const SizedBox(height: 22),
+            const SectionHeader(title: 'Top merchants', subtitle: 'Highest total expense by merchant'),
+            const SizedBox(height: 12),
+            if (merchants.isEmpty)
+              const EmptyCard(text: 'No merchant spending data for this period.')
+            else
+              ...merchants.entries.map(
+                (entry) => Container(
+                  margin: const EdgeInsets.only(bottom: 9),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: const Color(0xFFE5EBE7)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEAF7F0),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.storefront_outlined, color: Color(0xFF0A8B56), size: 20),
+                      ),
+                      const SizedBox(width: 11),
+                      Expanded(
+                        child: Text(
+                          entry.key,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                      Text(
+                        money.format(entry.value),
+                        style: const TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
           ],
         );
       },
+    );
+  }
+}
+
+class _InsightCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final String amount;
+  final IconData icon;
+  final bool wide;
+
+  const _InsightCard({
+    required this.title,
+    required this.value,
+    required this.amount,
+    required this.icon,
+    this.wide = false,
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: const Color(0xFFE4EBE7)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEAF7F0),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(icon, color: const Color(0xFF0A8B56), size: 22),
+            ),
+            const SizedBox(width: 11),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(fontSize: 11.5, color: Color(0xFF7B8780), fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 3),
+                  Text(
+                    value,
+                    maxLines: wide ? 2 : 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF202C25)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(amount, style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF0A8B56))),
+          ],
+        ),
+      );
+}
+
+class MonthlySpendChart extends StatelessWidget {
+  final List<double> values;
+  const MonthlySpendChart({super.key, required this.values});
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = List<double>.generate(12, (i) => i < values.length ? values[i] : 0);
+    var maxValue = 0.0;
+    for (final v in normalized) {
+      if (v > maxValue) maxValue = v;
+    }
+    final hasData = maxValue > 0;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 20, 14, 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFE4EBE7)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (hasData)
+            Text(
+              'Peak month: ${DateFormat.MMM().format(DateTime(2024, normalized.indexOf(maxValue) + 1))} · ${money.format(maxValue)}',
+              style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF4F5D54)),
+            )
+          else
+            const Text('No expense data for this year.', style: TextStyle(color: Color(0xFF738078))),
+          const SizedBox(height: 18),
+          SizedBox(
+            height: 170,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: List.generate(12, (index) {
+                final value = normalized[index];
+                final height = hasData ? (12 + (118 * (value / maxValue))).clamp(12.0, 130.0).toDouble() : 12.0;
+                return Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      Expanded(
+                        child: Align(
+                          alignment: Alignment.bottomCenter,
+                          child: Container(
+                            width: 16,
+                            height: height,
+                            decoration: BoxDecoration(
+                              color: value == maxValue && value > 0
+                                  ? const Color(0xFF0A8B56)
+                                  : const Color(0xFFBFE7D1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        DateFormat.MMM().format(DateTime(2024, index + 1)).substring(0, 1),
+                        style: const TextStyle(fontSize: 10.5, color: Color(0xFF7B8780), fontWeight: FontWeight.w700),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -671,6 +1583,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool loading = true;
   bool smsEnabled = false;
   bool smsPermission = false;
+  bool smsHistoryPermission = false;
+  bool importingHistory = false;
+  String historyStatus = 'Optional: scan older bank/payment SMS already on this phone';
   bool phonePeEnabled = false;
   bool notificationAccess = false;
   bool hybridClassifier = true;
@@ -690,6 +1605,7 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       smsEnabled = await AppDb.instance.getBoolSetting('sms_tracking_enabled');
       smsPermission = await NativeBridge.hasSmsPermission();
+      smsHistoryPermission = await NativeBridge.hasSmsHistoryPermission();
       phonePeEnabled = await AppDb.instance.getBoolSetting('phonepe_notification_enabled');
       notificationAccess = await NativeBridge.hasNotificationListenerPermission();
       hybridClassifier = await AppDb.instance.getBoolSetting('hybrid_classifier_enabled', fallback: true);
@@ -703,6 +1619,67 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     } finally {
       if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> importPreviousSms() async {
+    final confirm = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Import previous SMS?'),
+            content: const Text(
+              'Expense Tracker will scan your existing SMS inbox locally, run the same hybrid classifier, '
+              'and add only messages that look like completed financial transactions. OTPs, promotional '
+              'messages and pending/autopay reminders are ignored. No SMS text is uploaded.',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Allow & import')),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirm || !mounted) return;
+
+    smsHistoryPermission = await NativeBridge.requestSmsHistoryPermission();
+    if (!smsHistoryPermission) {
+      if (mounted) {
+        setState(() {
+          historyStatus = 'READ_SMS permission was not granted';
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        importingHistory = true;
+        historyStatus = 'Scanning previous SMS on this device…';
+      });
+    }
+
+    try {
+      final result = await NativeBridge.importHistoricalSms();
+      await AppDb.instance.setSetting(
+        'last_sms_import_at',
+        DateTime.now().millisecondsSinceEpoch.toString(),
+      );
+      if (!mounted) return;
+      setState(() {
+        historyStatus =
+            'Scanned ${result.scanned} · imported ${result.imported} · duplicates ${result.duplicates} · ignored ${result.ignored}';
+      });
+      widget.onChanged();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Imported ${result.imported} previous transactions.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        historyStatus = 'Historical SMS import failed: $e';
+      });
+    } finally {
+      if (mounted) setState(() => importingHistory = false);
     }
   }
 
@@ -745,6 +1722,23 @@ class _SettingsPageState extends State<SettingsPage> {
                 if (mounted) setState(() {});
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.history_rounded),
+              title: const Text('Import previous SMS'),
+              subtitle: Text(historyStatus),
+              trailing: importingHistory
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    )
+                  : FilledButton.tonal(
+                      onPressed: importPreviousSms,
+                      child: Text(smsHistoryPermission ? 'Import again' : 'Allow'),
+                    ),
+              onTap: importingHistory ? null : importPreviousSms,
+            ),
+            const Divider(),
             SwitchListTile(
               value: phonePeEnabled,
               secondary: const Icon(Icons.notifications_active_outlined),

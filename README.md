@@ -99,3 +99,26 @@ SMS and notification content stays on the device in the local SQLite database.
 - The included model is a compact product classifier trained on representative synthetic banking/UPI message patterns. It should be tested against real messages from the banks and payment apps you use before relying on it broadly.
 - Android/PhonePe can change notification wording at any time; low-confidence messages are intentionally ignored rather than guessed.
 - PhonePe private transaction-history notes are not directly readable by this app.
+
+## v10: historical SMS + full transaction details + analytics
+
+- Tap any transaction to open a full detail view with amount, category, source, sender, account hint, UPI/reference, classifier confidence, note, and the complete raw SMS/PhonePe message when available.
+- Settings → **Import previous SMS** asks for `READ_SMS` only when the user explicitly chooses to import. Existing inbox messages are scanned locally with the same hybrid classifier and deduplicated before insertion.
+- Reports now support **Monthly** and **Yearly** views, a 12-month spending graph, top category, top merchant, largest single expense, category distribution, and top-merchant totals.
+- Transaction filter chips use explicit selected/unselected contrast so labels remain readable.
+
+### Android SMS permission note
+
+`READ_SMS` and `RECEIVE_SMS` are sensitive Android permissions. They are appropriate for a directly installed/internal build only when the user understands and enables the feature. Public Google Play distribution is subject to Google Play SMS/Call Log permission policy and may require an eligible core-SMS use case or a policy exception.
+
+
+## UPI QR scanner
+The Pay screen can scan standard UPI QR codes, populate payment fields, and requires user review before launching the UPI app.
+
+
+## UPI QR payments
+- Pay screen supports both QR scanning and manual UPI ID entry.
+- Uses the device camera to scan standard `upi://pay` QR codes.
+- Extracts payee UPI ID (`pa`), payee name (`pn`), amount (`am`), note (`tn`) and transaction reference (`tr`) when available.
+- QR scanning never launches payment automatically. The user reviews all populated fields and taps Pay.
+- Camera access is requested only when the scanner is opened.

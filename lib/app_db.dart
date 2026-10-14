@@ -391,6 +391,109 @@ class AppDb {
     };
   }
 
+
+  Future<TxRecord?> transactionById(int id) async {
+    final db = await database;
+    final rows = await db.query(
+      'transactions',
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : TxRecord.fromMap(rows.first);
+  }
+
+  Future<List<int>> availableYears() async {
+    final db = await database;
+    final rows = await db.query('transactions', columns: ['occurred_at']);
+    final years = <int>{DateTime.now().year};
+    for (final row in rows) {
+      final value = row['occurred_at'];
+      if (value is num) {
+        years.add(DateTime.fromMillisecondsSinceEpoch(value.toInt()).year);
+      }
+    }
+    final result = years.toList()..sort((a, b) => b.compareTo(a));
+    return result;
+  }
+
+  Future<Map<String, double>> totalsByTypeForPeriod(int startMs, int endMs) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT type, COALESCE(SUM(amount), 0) AS total FROM transactions '
+      'WHERE occurred_at >= ? AND occurred_at < ? GROUP BY type',
+      [startMs, endMs],
+    );
+    return {
+      for (final row in rows)
+        row['type'] as String: (row['total'] as num).toDouble(),
+    };
+  }
+
+  Future<Map<String, double>> expenseByCategoryForPeriod(int startMs, int endMs) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      "SELECT category, COALESCE(SUM(amount), 0) AS total FROM transactions "
+      "WHERE occurred_at >= ? AND occurred_at < ? AND type = 'expense' "
+      'GROUP BY category ORDER BY total DESC',
+      [startMs, endMs],
+    );
+    return {
+      for (final row in rows)
+        row['category'] as String: (row['total'] as num).toDouble(),
+    };
+  }
+
+  Future<Map<String, double>> expenseByMerchantForPeriod(
+    int startMs,
+    int endMs, {
+    int limit = 8,
+  }) async {
+    final db = await database;
+    final rows = await db.rawQuery(
+      "SELECT merchant, COALESCE(SUM(amount), 0) AS total FROM transactions "
+      "WHERE occurred_at >= ? AND occurred_at < ? AND type = 'expense' "
+      'GROUP BY merchant ORDER BY total DESC LIMIT ?',
+      [startMs, endMs, limit],
+    );
+    return {
+      for (final row in rows)
+        row['merchant'] as String: (row['total'] as num).toDouble(),
+    };
+  }
+
+  Future<TxRecord?> largestExpenseForPeriod(int startMs, int endMs) async {
+    final db = await database;
+    final rows = await db.query(
+      'transactions',
+      where: "type = 'expense' AND occurred_at >= ? AND occurred_at < ?",
+      whereArgs: [startMs, endMs],
+      orderBy: 'amount DESC',
+      limit: 1,
+    );
+    return rows.isEmpty ? null : TxRecord.fromMap(rows.first);
+  }
+
+  Future<List<double>> monthlyExpenseForYear(int year) async {
+    final db = await database;
+    final start = DateTime(year, 1, 1).millisecondsSinceEpoch;
+    final end = DateTime(year + 1, 1, 1).millisecondsSinceEpoch;
+    final rows = await db.query(
+      'transactions',
+      columns: ['amount', 'occurred_at'],
+      where: "type = 'expense' AND occurred_at >= ? AND occurred_at < ?",
+      whereArgs: [start, end],
+    );
+    final totals = List<double>.filled(12, 0);
+    for (final row in rows) {
+      final amount = (row['amount'] as num).toDouble();
+      final occurredAt = (row['occurred_at'] as num).toInt();
+      final month = DateTime.fromMillisecondsSinceEpoch(occurredAt).month;
+      totals[month - 1] += amount;
+    }
+    return totals;
+  }
+
   Future<List<MerchantRule>> rules() async {
     final db = await database;
     final rows = await db.query('rules', orderBy: 'is_user_rule DESC, merchant COLLATE NOCASE ASC');

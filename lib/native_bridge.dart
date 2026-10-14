@@ -29,6 +29,29 @@ class UpiResult {
       );
 }
 
+
+class HistoricalSmsImportResult {
+  final int scanned;
+  final int imported;
+  final int duplicates;
+  final int ignored;
+
+  const HistoricalSmsImportResult({
+    required this.scanned,
+    required this.imported,
+    required this.duplicates,
+    required this.ignored,
+  });
+
+  factory HistoricalSmsImportResult.fromMap(Map<dynamic, dynamic>? map) =>
+      HistoricalSmsImportResult(
+        scanned: (map?['scanned'] as num?)?.toInt() ?? 0,
+        imported: (map?['imported'] as num?)?.toInt() ?? 0,
+        duplicates: (map?['duplicates'] as num?)?.toInt() ?? 0,
+        ignored: (map?['ignored'] as num?)?.toInt() ?? 0,
+      );
+}
+
 class NativeBridge {
   static const MethodChannel _channel = MethodChannel('expense_tracker/native');
 
@@ -37,6 +60,17 @@ class NativeBridge {
 
   static Future<bool> hasSmsPermission() async =>
       (await _channel.invokeMethod<bool>('hasSmsPermission')) ?? false;
+
+  static Future<bool> requestSmsHistoryPermission() async =>
+      (await _channel.invokeMethod<bool>('requestSmsHistoryPermission')) ?? false;
+
+  static Future<bool> hasSmsHistoryPermission() async =>
+      (await _channel.invokeMethod<bool>('hasSmsHistoryPermission')) ?? false;
+
+  static Future<HistoricalSmsImportResult> importHistoricalSms() async {
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('importHistoricalSms');
+    return HistoricalSmsImportResult.fromMap(raw);
+  }
 
   static Future<bool> requestNotificationPermission() async =>
       (await _channel.invokeMethod<bool>('requestNotificationPermission')) ?? false;
