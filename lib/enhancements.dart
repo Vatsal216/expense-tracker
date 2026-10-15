@@ -123,19 +123,12 @@ class EnhancementHubPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final items = <_HubItem>[
-      _HubItem('Smart automation', 'Control transfer matching, dedup, recurring detection and alerts.', Icons.tune_rounded, const SmartAutomationPage()),
-      _HubItem('Smart transfers', 'Match your own-account debit and credit pairs.', Icons.swap_horiz_rounded, const SmartTransfersPage()),
-      _HubItem('Merchant cleanup', 'Merge messy merchant names into one merchant.', Icons.storefront_rounded, const MerchantAliasesPage()),
-      _HubItem('Advanced search', 'Search by merchant, amount, category and source.', Icons.manage_search_rounded, const AdvancedSearchPage()),
-      _HubItem('Cash flow', 'Savings rate, daily average and month-end projection.', Icons.ssid_chart_rounded, const CashFlowPage()),
-      _HubItem('Smart insights', 'Anomaly alerts and budget forecasts.', Icons.auto_awesome_rounded, const SmartInsightsPage()),
-      _HubItem('Receipt scanner', 'Scan or import receipts with on-device OCR.', Icons.document_scanner_rounded, const ReceiptImportPage()),
-      _HubItem('Export & encrypted backup', 'CSV/PDF export and protected backup/restore.', Icons.ios_share_rounded, const ExportBackupPage()),
-      _HubItem('Needs review', 'Review low-confidence ML detections.', Icons.fact_check_rounded, const ReviewQueuePage()),
-      _HubItem('ML feedback', 'See accepted, corrected and ignored classifications.', Icons.psychology_alt_rounded, const ModelFeedbackPage()),
-      _HubItem('Net worth', 'Optional manual assets and liabilities.', Icons.account_balance_wallet_rounded, const NetWorthPage()),
-      _HubItem('Privacy & appearance', 'Biometric lock and dark mode. Screenshots stay enabled during QA.', Icons.security_rounded, const PrivacyAppearancePage()),
-      _HubItem('Home widget', 'Refresh the Android spending widget.', Icons.widgets_rounded, const HomeWidgetPage()),
+      _HubItem('Advanced search', 'Find transactions by merchant, amount, category, source or date.', Icons.manage_search_rounded, const AdvancedSearchPage()),
+      _HubItem('Cash flow', 'Understand money in, money out and your current spending pace.', Icons.ssid_chart_rounded, const CashFlowPage()),
+      _HubItem('Recurring payments', 'You decide which payments are recurring. The app will not guess.', Icons.repeat_rounded, const RecurringPaymentsPage()),
+      _HubItem('Receipt scanner', 'Scan or import a receipt and save the expense locally.', Icons.document_scanner_rounded, const ReceiptImportPage()),
+      _HubItem('Export & backup', 'Export reports or create an encrypted local backup.', Icons.ios_share_rounded, const ExportBackupPage()),
+      _HubItem('Privacy & appearance', 'Biometric lock and dark mode. Screenshots remain enabled during QA.', Icons.security_rounded, const PrivacyAppearancePage()),
     ];
     return Scaffold(
       appBar: AppBar(title: const Text('More tools')),
@@ -266,89 +259,197 @@ class _SmartTransfersPageState extends State<SmartTransfersPage> {
   );
 }
 
-class RecurringPaymentsPage extends StatelessWidget {
+Future<bool> showMarkRecurringDialog(BuildContext context, TxRecord tx) async {
+  String frequency = 'Monthly';
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) => StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('Mark as recurring?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              tx.normalizedMerchant.isNotEmpty ? tx.normalizedMerchant : tx.merchant,
+              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17),
+            ),
+            const SizedBox(height: 6),
+            const Text('Only payments you confirm here will appear as recurring. Future matching transactions will automatically appear in this recurring group.'),
+            const SizedBox(height: 16),
+            DropdownButtonFormField<String>(
+              value: frequency,
+              decoration: const InputDecoration(labelText: 'Expected frequency'),
+              items: const ['Weekly', 'Monthly', 'Quarterly', 'Yearly']
+                  .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                  .toList(),
+              onChanged: (value) => setState(() => frequency = value ?? frequency),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () async {
+              await AppDb.instance.saveRecurringRuleFromTransaction(tx, frequency: frequency);
+              if (context.mounted) Navigator.pop(context, true);
+            },
+            child: const Text('Mark recurring'),
+          ),
+        ],
+      ),
+    ),
+  );
+  return result ?? false;
+}
+
+class RecurringPaymentsPage extends StatefulWidget {
   const RecurringPaymentsPage({super.key});
+  @override
+  State<RecurringPaymentsPage> createState() => _RecurringPaymentsPageState();
+}
+
+class _RecurringPaymentsPageState extends State<RecurringPaymentsPage> {
+  Future<void> _add() async {
+    final transactions = await AppDb.instance.transactions(limit: 120);
+    if (!mounted) return;
+    final seen = <String>{};
+    final candidates = <TxRecord>[];
+    for (final tx in transactions) {
+      if (tx.type != 'expense' && tx.type != 'investment') continue;
+      final key = (tx.normalizedMerchant.isNotEmpty ? tx.normalizedMerchant : tx.merchant).toLowerCase().trim();
+      if (key.isEmpty || !seen.add(key)) continue;
+      candidates.add(tx);
+    }
+    final selected = await showModalBottomSheet<TxRecord>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * .72,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 4, 18, 12),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Choose a payment', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.fromLTRB(18, 0, 18, 12),
+                child: Text('Pick one existing transaction. The app will use that merchant/person as the recurring rule instead of trying to detect patterns automatically.'),
+              ),
+              Expanded(
+                child: ListView.separated(
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 24),
+                  itemCount: candidates.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, i) {
+                    final tx = candidates[i];
+                    return Card(
+                      child: ListTile(
+                        title: Text(tx.normalizedMerchant.isNotEmpty ? tx.normalizedMerchant : tx.merchant, style: const TextStyle(fontWeight: FontWeight.w800)),
+                        subtitle: Text('${tx.category} • ${DateFormat('dd MMM yyyy').format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt))}'),
+                        trailing: Text(_money.format(tx.amount), style: const TextStyle(fontWeight: FontWeight.w900)),
+                        onTap: () => Navigator.pop(context, tx),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final saved = await showMarkRecurringDialog(context, selected);
+    if (saved && mounted) setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('Recurring payments')),
+        floatingActionButton: FloatingActionButton.extended(
+          onPressed: _add,
+          icon: const Icon(Icons.add_rounded),
+          label: const Text('Add recurring'),
+        ),
         body: FutureBuilder<List<Map<String, Object?>>>(
-          future: AppDb.instance.detectRecurringPayments(),
+          future: AppDb.instance.userRecurringSummaries(),
           builder: (context, snap) {
-            if (snap.hasError) {
-              return _EmptyInfo(
-                icon: Icons.error_outline,
-                title: 'Could not analyze recurring payments',
-                text: '${snap.error}',
-              );
-            }
             if (!snap.hasData) return const Center(child: CircularProgressIndicator());
             final data = snap.data!;
             if (data.isEmpty) {
-              return const _EmptyInfo(
-                icon: Icons.autorenew,
-                title: 'No strong recurring pattern yet',
-                text: 'To reduce false positives, the app normally requires at least 3 completed similar payments with a stable interval and amount. Two can qualify only when the SMS itself clearly says subscription, EMI, SIP, autopay, premium or renewal.',
+              return _EmptyInfo(
+                icon: Icons.repeat_rounded,
+                title: 'You have not marked anything recurring',
+                text: 'Tap “Add recurring” and choose a transaction. The app will never decide recurring payments by itself.',
+                action: FilledButton.icon(onPressed: _add, icon: const Icon(Icons.add), label: const Text('Choose a payment')),
               );
             }
             return ListView.separated(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
               itemCount: data.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 12),
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
               itemBuilder: (context, i) {
                 final r = data[i];
-                final due = DateTime.fromMillisecondsSinceEpoch((r['nextDue'] as num).toInt());
-                final confidence = (((r['confidence'] as num?)?.toDouble() ?? 0) * 100).round();
-                final variation = (r['amountVariationPct'] as num?)?.toDouble() ?? 0;
+                final nextMs = (r['nextDue'] as num?)?.toInt() ?? 0;
+                final amount = (r['averageAmount'] as num?)?.toDouble() ?? 0;
+                final count = (r['occurrences'] as num?)?.toInt() ?? 0;
                 return Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            CircleAvatar(child: Icon(r['type'] == 'investment' ? Icons.trending_up_rounded : Icons.repeat_rounded)),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text('${r['merchant']}', maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
-                                  const SizedBox(height: 3),
-                                  Text('${r['category']} • ${r['frequency']}', style: Theme.of(context).textTheme.bodySmall),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Flexible(
-                              child: FittedBox(
-                                fit: BoxFit.scaleDown,
-                                alignment: Alignment.centerRight,
-                                child: Text(_money.format(r['averageAmount']), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            _InfoPill(icon: Icons.event_rounded, text: 'Next ${DateFormat('dd MMM').format(due)}'),
-                            _InfoPill(icon: Icons.history_rounded, text: '${r['occurrences']} payments'),
-                            _InfoPill(icon: Icons.verified_outlined, text: '$confidence% confidence'),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          'Detected from completed payments with an average amount variation of ${variation.toStringAsFixed(1)}%. This is a prediction, not a scheduled bank instruction.',
-                          style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4),
-                        ),
-                      ],
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    leading: const CircleAvatar(child: Icon(Icons.repeat_rounded)),
+                    title: Text('${r['name']}', style: const TextStyle(fontWeight: FontWeight.w900)),
+                    subtitle: Text(
+                      '${amount > 0 ? '${_money.format(amount)} • ' : ''}${r['frequency']} • $count matching transaction${count == 1 ? '' : 's'}${nextMs > 0 ? ' • next around ${DateFormat('dd MMM').format(DateTime.fromMillisecondsSinceEpoch(nextMs))}' : ''}',
                     ),
+                    trailing: PopupMenuButton<String>(
+                      tooltip: 'Recurring options',
+                      onSelected: (value) async {
+                        if (value == 'delete') {
+                          await AppDb.instance.deleteRecurringRule((r['id'] as num).toInt());
+                          if (mounted) setState(() {});
+                        }
+                      },
+                      itemBuilder: (_) => const [PopupMenuItem(value: 'delete', child: Text('Remove recurring rule'))],
+                    ),
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => _RecurringRuleTransactionsPage(rule: r))),
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      );
+}
+
+class _RecurringRuleTransactionsPage extends StatelessWidget {
+  final Map<String, Object?> rule;
+  const _RecurringRuleTransactionsPage({required this.rule});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: Text('${rule['name']}')),
+        body: FutureBuilder<List<TxRecord>>(
+          future: AppDb.instance.recurringTransactionsForRule(rule),
+          builder: (context, snap) {
+            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+            final rows = snap.data!;
+            if (rows.isEmpty) return const _EmptyInfo(icon: Icons.receipt_long_outlined, title: 'No matching transactions', text: 'Future matching transactions will appear here automatically.');
+            return ListView.separated(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+              itemCount: rows.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, i) {
+                final tx = rows[i];
+                return Card(
+                  child: ListTile(
+                    title: Text(tx.merchant, style: const TextStyle(fontWeight: FontWeight.w800)),
+                    subtitle: Text('${tx.category} • ${_date.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt))}'),
+                    trailing: Text(_money.format(tx.amount), style: const TextStyle(fontWeight: FontWeight.w900)),
                   ),
                 );
               },
@@ -976,10 +1077,182 @@ class _ExportBackupPageState extends State<ExportBackupPage> {
       );
 }
 
-class ReviewQueuePage extends StatefulWidget{const ReviewQueuePage({super.key});@override State<ReviewQueuePage> createState()=>_ReviewQueuePageState();}
-class _ReviewQueuePageState extends State<ReviewQueuePage>{
-  Future<void> act(TxRecord t,bool accept)async{if(t.id==null)return;if(accept)await AppDb.instance.acceptReview(t.id!);else await AppDb.instance.ignoreReview(t.id!);setState((){});}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Needs review')),body:FutureBuilder<List<TxRecord>>(future:AppDb.instance.reviewTransactions(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());if(s.data!.isEmpty)return const _EmptyInfo(icon:Icons.task_alt,title:'Review queue is clear',text:'Low-confidence ML detections will appear here instead of being silently added or discarded.');return ListView.builder(padding:const EdgeInsets.all(16),itemCount:s.data!.length,itemBuilder:(context,i){final t=s.data![i];return Card(margin:const EdgeInsets.only(bottom:10),child:Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t.merchant,style:const TextStyle(fontWeight:FontWeight.w900,fontSize:17)),Text('${_money.format(t.amount)} • ${t.type} • ${(t.classificationConfidence*100).round()}% confidence'),if(t.rawMessage.isNotEmpty)...[const SizedBox(height:8),Text(t.rawMessage,maxLines:4,overflow:TextOverflow.ellipsis)],const SizedBox(height:10),Row(children:[Expanded(child:OutlinedButton(onPressed:()=>act(t,false),child:const Text('Ignore'))),const SizedBox(width:8),Expanded(child:FilledButton(onPressed:()=>act(t,true),child:const Text('Accept')))])])));});}));
+class ReviewQueuePage extends StatefulWidget {
+  const ReviewQueuePage({super.key});
+  @override
+  State<ReviewQueuePage> createState() => _ReviewQueuePageState();
+}
+
+class _ReviewQueuePageState extends State<ReviewQueuePage> {
+  Future<void> act(TxRecord t, bool accept) async {
+    if (t.id == null) return;
+    if (accept) {
+      await AppDb.instance.acceptReview(t.id!);
+    } else {
+      await AppDb.instance.ignoreReview(t.id!);
+    }
+    if (mounted) setState(() {});
+  }
+
+  Future<void> fix(TxRecord t) async {
+    if (t.id == null) return;
+    final merchant = TextEditingController(text: t.merchant);
+    final note = TextEditingController(text: t.note);
+    var type = t.type;
+    var category = t.category;
+    final categories = await AppDb.instance.categories();
+    bool allowed(CategoryRecord c) => c.kind == type || type == 'transfer' || type == 'refund';
+    final initialEligible = categories.where(allowed).toList();
+    if (!initialEligible.any((c) => c.name == category) && initialEligible.isNotEmpty) {
+      category = initialEligible.first.name;
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('Fix classification'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(controller: merchant, decoration: const InputDecoration(labelText: 'Merchant')),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: type,
+                  decoration: const InputDecoration(labelText: 'Type'),
+                  items: const ['expense', 'investment', 'income', 'transfer', 'refund']
+                      .map((x) => DropdownMenuItem(value: x, child: Text(_cap(x))))
+                      .toList(),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setDialogState(() {
+                      type = value;
+                      final matching = categories.where((c) => c.kind == type).toList();
+                      if (matching.isNotEmpty) category = matching.first.name;
+                    });
+                  },
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: categories.where((c) => c.kind == type || type == 'transfer' || type == 'refund').any((c) => c.name == category) ? category : null,
+                  decoration: const InputDecoration(labelText: 'Category'),
+                  items: categories
+                      .where((c) => c.kind == type || type == 'transfer' || type == 'refund')
+                      .map((c) => DropdownMenuItem(value: c.name, child: Text(c.name)))
+                      .toList(),
+                  onChanged: (value) => setDialogState(() => category = value ?? category),
+                ),
+                const SizedBox(height: 10),
+                TextField(controller: note, decoration: const InputDecoration(labelText: 'Note')),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () async {
+                final merchantValue = merchant.text.trim().isEmpty ? t.merchant : merchant.text.trim();
+                final similarCount = await AppDb.instance.countSimilarTransactions(t);
+                if (!dialogContext.mounted) return;
+                final scope = await showDialog<String>(
+                  context: dialogContext,
+                  builder: (scopeContext) => AlertDialog(
+                    title: const Text('Apply this correction?'),
+                    content: Text(
+                      similarCount > 0
+                          ? 'There are $similarCount similar existing transaction${similarCount == 1 ? '' : 's'}. Update only this one, or apply the correction to similar transactions and future messages?'
+                          : 'Save only this transaction, or remember the same correction for future similar messages?',
+                    ),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(scopeContext, 'one'), child: const Text('Only this')),
+                      FilledButton(onPressed: () => Navigator.pop(scopeContext, 'all'), child: Text(similarCount > 0 ? 'All similar + future' : 'Remember for future')),
+                    ],
+                  ),
+                );
+                if (scope == null) return;
+                await AppDb.instance.updateTransaction(
+                  t.id!,
+                  type: type,
+                  category: category,
+                  merchant: merchantValue,
+                  note: note.text.trim(),
+                  learnRule: false,
+                );
+                if (scope == 'all') {
+                  await AppDb.instance.applyCorrectionToSimilar(source: t, type: type, category: category, merchant: merchantValue);
+                }
+                if (dialogContext.mounted) Navigator.pop(dialogContext);
+              },
+              child: const Text('Save correction'),
+            ),
+          ],
+        ),
+      ),
+    );
+    merchant.dispose();
+    note.dispose();
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Financial inbox')),
+        body: FutureBuilder<List<TxRecord>>(
+          future: AppDb.instance.reviewTransactions(),
+          builder: (context, s) {
+            if (!s.hasData) return const Center(child: CircularProgressIndicator());
+            if (s.data!.isEmpty) {
+              return const _EmptyInfo(
+                icon: Icons.task_alt,
+                title: 'Inbox is clear',
+                text: 'Low-confidence financial messages appear here so the app asks instead of guessing.',
+              );
+            }
+            return ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: s.data!.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 10),
+              itemBuilder: (context, i) {
+                final t = s.data![i];
+                return Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(child: Text(t.merchant, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 17))),
+                            const SizedBox(width: 8),
+                            Text(_money.format(t.amount), style: const TextStyle(fontWeight: FontWeight.w900)),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text('${_cap(t.type)} • ${t.category} • ${(t.classificationConfidence * 100).round()}% confidence'),
+                        if (t.rawMessage.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Text(t.rawMessage, maxLines: 4, overflow: TextOverflow.ellipsis),
+                        ],
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(child: OutlinedButton(onPressed: () => act(t, false), child: const Text('Ignore'))),
+                            const SizedBox(width: 8),
+                            Expanded(child: OutlinedButton(onPressed: () => fix(t), child: const Text('Fix'))),
+                            const SizedBox(width: 8),
+                            Expanded(child: FilledButton(onPressed: () => act(t, true), child: const Text('Accept'))),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      );
 }
 
 class ModelFeedbackPage extends StatelessWidget{const ModelFeedbackPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('ML feedback')),body:FutureBuilder<Map<String,int>>(future:AppDb.instance.modelFeedbackStats(),builder:(context,s){if(!s.hasData)return const Center(child:CircularProgressIndicator());final x=s.data!;final auto=x['auto']??0, corrected=x['corrected']??0;final acceptance=auto==0?0.0:((auto-corrected)/auto*100).clamp(0,100).toDouble();return ListView(padding:const EdgeInsets.all(16),children:[_MetricCard('Estimated accepted without correction','${acceptance.toStringAsFixed(1)}%',Icons.psychology),_MetricCard('Auto-classified','$auto',Icons.auto_awesome),_MetricCard('User corrections','$corrected',Icons.edit_note),_MetricCard('Review accepted','${x['accepted']??0}',Icons.check_circle),_MetricCard('Review ignored','${x['ignored']??0}',Icons.block),_MetricCard('Pending review','${x['pending']??0}',Icons.pending_actions),const Padding(padding:EdgeInsets.all(8),child:Text('These are local product-quality signals, not a formal benchmark accuracy score.',style:TextStyle(fontSize:12))) ]); }));}
@@ -1238,7 +1511,7 @@ class _SimpleNotice extends StatelessWidget {
 }
 
 
-class _EmptyInfo extends StatelessWidget{final IconData icon;final String title,text;const _EmptyInfo({required this.icon,required this.title,required this.text});@override Widget build(BuildContext context)=>Center(child:Padding(padding:const EdgeInsets.all(28),child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(icon,size:54,color:Theme.of(context).colorScheme.primary),const SizedBox(height:14),Text(title,textAlign:TextAlign.center,style:const TextStyle(fontSize:20,fontWeight:FontWeight.w900)),const SizedBox(height:7),Text(text,textAlign:TextAlign.center,style:const TextStyle(height:1.4))])));}
+class _EmptyInfo extends StatelessWidget{final IconData icon;final String title,text;final Widget? action;const _EmptyInfo({required this.icon,required this.title,required this.text,this.action});@override Widget build(BuildContext context)=>Center(child:Padding(padding:const EdgeInsets.all(28),child:Column(mainAxisSize:MainAxisSize.min,children:[Icon(icon,size:54,color:Theme.of(context).colorScheme.primary),const SizedBox(height:14),Text(title,textAlign:TextAlign.center,style:const TextStyle(fontSize:20,fontWeight:FontWeight.w900)),const SizedBox(height:7),Text(text,textAlign:TextAlign.center,style:const TextStyle(height:1.4)),if(action!=null)...[const SizedBox(height:18),action!]])));}
 String _cap(String x)=>x.isEmpty?x:x[0].toUpperCase()+x.substring(1);
 
 extension _StringTake on String { String take(int n)=>length<=n?this:substring(0,n); }

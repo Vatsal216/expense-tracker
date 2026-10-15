@@ -27,7 +27,7 @@ data class ParsedTransaction(
     val reviewStatus: String = "accepted",
 )
 
-class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tracker.db", null, 6) {
+class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tracker.db", null, 7) {
     override fun onCreate(db: SQLiteDatabase) {
         createSchema(db)
         seed(db)
@@ -116,6 +116,16 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
             original_category TEXT NOT NULL DEFAULT '',
             final_category TEXT NOT NULL DEFAULT '',
             action TEXT NOT NULL DEFAULT 'corrected',
+            created_at INTEGER NOT NULL
+        )""".trimIndent())
+        db.execSQL("""CREATE TABLE IF NOT EXISTS recurring_rules(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            merchant_key TEXT NOT NULL UNIQUE,
+            type TEXT NOT NULL,
+            category TEXT NOT NULL,
+            frequency TEXT NOT NULL DEFAULT 'Monthly',
+            enabled INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL
         )""".trimIndent())
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_tx_native_amount_time ON transactions(amount, occurred_at)")
@@ -236,28 +246,213 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
             .replace(Regex("\\s+"), " ").trim().ifBlank { merchant.trim() }
     }
 
-    private fun likelyDuplicate(tx: ParsedTransaction, source: String, normalized: String): Boolean {
-        if (getSetting("smart_dedup_enabled", "1") != "1") return false
-        val start = tx.occurredAt - 5 * 60 * 1000L
-        val end = tx.occurredAt + 5 * 60 * 1000L
+    private data class DuplicateCandidate(
+        val id: Long,
+        val source: String,
+        val type: String,
+        val category: String,
+        val merchant: String,
+        val normalizedMerchant: String,
+        val note: String,
+        val rawMessage: String,
+        val sender: String,
+        val paymentMethod: String,
+        val accountHint: String,
+        val upiReference: String,
+        val classificationMethod: String,
+        val classificationConfidence: Double,
+        val occurredAt: Long,
+    )
+
+    private fun isNotificationSource(source: String): Boolean = source.endsWith("_notification")
+
+    private fun isUpiLike(paymentMethod: String, rawMessage: String, merchant: String): Boolean {
+        val text = "$paymentMethod $rawMessage $merchant".lowercase(Locale.ROOT)
+        return listOf("upi", "gpay", "google pay", "phonepe", "paytm", "@ybl", "@ibl", "@ok", "@upi")
+            .any { text.contains(it) }
+    }
+
+    private fun classificationRank(method: String, category: String, confidence: Double): Double {
+        val base = when (method) {
+            "user_corrected" -> 100.0
+            "notification_action" -> 95.0
+            "merchant_rule" -> 85.0
+            "context_override" -> 78.0
+            "hard_gate" -> 75.0
+            "neural" -> 65.0
+            "upi_intent" -> 90.0
+            else -> 50.0
+        }
+        val categoryBonus = if (category.isNotBlank() && !category.equals("Uncategorized", ignoreCase = true)) 20.0 else 0.0
+        return base + categoryBonus + confidence.coerceIn(0.0, 1.0)
+    }
+
+    private fun merchantScore(merchant: String): Int {
+        val m = merchant.trim()
+        if (m.isBlank()) return -100
+        val lower = m.lowercase(Locale.ROOT)
+        var score = 20
+        if (lower == "unknown" || lower == "phonepe" || lower == "google pay" || lower == "gpay" || lower == "paytm") score -= 25
+        if (Regex("(?i)^(?:gpay|phonepe|paytm)[-_ ]?\\d+").containsMatchIn(m)) score -= 35
+        if (Regex("\\d{7,}").containsMatchIn(m)) score -= 12
+        if (m.count { it.isLetter() } >= 5) score += 10
+        if (m.contains(' ')) score += 5
+        return score
+    }
+
+    private fun findDuplicateCandidate(tx: ParsedTransaction, source: String, normalized: String): DuplicateCandidate? {
+        if (getSetting("smart_dedup_enabled", "1") != "1") return null
+        val start = tx.occurredAt - 10 * 60 * 1000L
+        val end = tx.occurredAt + 10 * 60 * 1000L
+        var best: DuplicateCandidate? = null
+        var bestScore = Long.MIN_VALUE
+
         readableDatabase.rawQuery(
-            "SELECT source,upi_reference,normalized_merchant,merchant FROM transactions WHERE review_status<>'ignored' AND amount BETWEEN ? AND ? AND occurred_at>=? AND occurred_at<=?",
+            """SELECT id,source,type,category,merchant,normalized_merchant,note,raw_message,sender,payment_method,
+                      account_hint,upi_reference,classification_method,classification_confidence,occurred_at
+               FROM transactions
+               WHERE review_status<>'ignored' AND amount BETWEEN ? AND ? AND occurred_at>=? AND occurred_at<=?""".trimIndent(),
             arrayOf((tx.amount - 0.01).toString(), (tx.amount + 0.01).toString(), start.toString(), end.toString())
         ).use { c ->
             while (c.moveToNext()) {
-                val existingSource = c.getString(0)
-                val ref = c.getString(1).orEmpty()
-                val existingNormalized = c.getString(2).orEmpty().ifBlank { normalizeMerchant(c.getString(3).orEmpty()) }
-                if (tx.upiReference.isNotBlank() && ref == tx.upiReference) return true
-                if (source != existingSource && normalized.equals(existingNormalized, ignoreCase = true)) return true
+                val candidate = DuplicateCandidate(
+                    id = c.getLong(0), source = c.getString(1).orEmpty(), type = c.getString(2).orEmpty(), category = c.getString(3).orEmpty(),
+                    merchant = c.getString(4).orEmpty(), normalizedMerchant = c.getString(5).orEmpty(), note = c.getString(6).orEmpty(),
+                    rawMessage = c.getString(7).orEmpty(), sender = c.getString(8).orEmpty(), paymentMethod = c.getString(9).orEmpty(),
+                    accountHint = c.getString(10).orEmpty(), upiReference = c.getString(11).orEmpty(), classificationMethod = c.getString(12).orEmpty(),
+                    classificationConfidence = c.getDouble(13), occurredAt = c.getLong(14),
+                )
+                val diff = kotlin.math.abs(candidate.occurredAt - tx.occurredAt)
+                val exactRef = tx.upiReference.isNotBlank() && candidate.upiReference.isNotBlank() &&
+                    tx.upiReference.equals(candidate.upiReference, ignoreCase = true)
+
+                if (exactRef) {
+                    val score = 1000000L - diff
+                    if (score > bestScore) { best = candidate; bestScore = score }
+                    continue
+                }
+
+                val crossSource = (source == "sms" && isNotificationSource(candidate.source)) ||
+                    (candidate.source == "sms" && isNotificationSource(source))
+                if (!crossSource) continue
+
+                if (candidate.accountHint.isNotBlank() && tx.accountHint.isNotBlank() && candidate.accountHint != tx.accountHint) continue
+
+                val userCorrected = candidate.classificationMethod == "user_corrected" || tx.classificationMethod == "user_corrected"
+                if (!userCorrected && candidate.type != tx.type) continue
+
+                val candidateNormalized = candidate.normalizedMerchant.ifBlank { normalizeMerchant(candidate.merchant) }
+                val merchantMatch = candidateNormalized.equals(normalized, ignoreCase = true)
+                val upiMatch = isUpiLike(candidate.paymentMethod, candidate.rawMessage, candidate.merchant) &&
+                    isUpiLike(tx.paymentMethod, tx.rawMessage, tx.merchant)
+
+                val qualifies = (merchantMatch && diff <= 5 * 60 * 1000L) || (upiMatch && diff <= 3 * 60 * 1000L)
+                if (!qualifies) continue
+
+                val score = when {
+                    merchantMatch -> 800000L - diff
+                    else -> 600000L - diff
+                }
+                if (score > bestScore) { best = candidate; bestScore = score }
             }
         }
-        return false
+        return best
+    }
+
+    private fun mergeDuplicate(existing: DuplicateCandidate, incoming: ParsedTransaction, incomingSource: String, incomingNormalized: String) {
+        val existingRank = classificationRank(existing.classificationMethod, existing.category, existing.classificationConfidence)
+        val incomingRank = classificationRank(incoming.classificationMethod, incoming.category, incoming.classificationConfidence)
+        val incomingClassificationWins = incomingRank > existingRank
+
+        val chosenType = if (incomingClassificationWins) incoming.type else existing.type
+        val chosenCategory = if (incomingClassificationWins) incoming.category else existing.category
+        val chosenMethod = if (incomingClassificationWins) incoming.classificationMethod else existing.classificationMethod
+        val chosenConfidence = if (incomingClassificationWins) incoming.classificationConfidence else existing.classificationConfidence
+
+        val existingMerchantScore = merchantScore(existing.merchant)
+        val incomingMerchantScore = merchantScore(incoming.merchant)
+        val chosenMerchant = when {
+            incomingSource == "sms" && incomingMerchantScore >= 0 -> incoming.merchant
+            existing.source == "sms" && existingMerchantScore >= 0 -> existing.merchant
+            incomingMerchantScore > existingMerchantScore -> incoming.merchant
+            else -> existing.merchant
+        }.ifBlank { existing.merchant.ifBlank { incoming.merchant } }
+        val chosenNormalized = normalizeMerchant(chosenMerchant).ifBlank {
+            if (incomingNormalized.isNotBlank()) incomingNormalized else existing.normalizedMerchant
+        }
+
+        val smsIsIncoming = incomingSource == "sms"
+        val smsIsExisting = existing.source == "sms"
+        val chosenSource = if (smsIsIncoming || smsIsExisting) "sms" else existing.source
+        val chosenRaw = when {
+            smsIsIncoming && incoming.rawMessage.isNotBlank() -> incoming.rawMessage
+            smsIsExisting && existing.rawMessage.isNotBlank() -> existing.rawMessage
+            existing.rawMessage.isNotBlank() -> existing.rawMessage
+            else -> incoming.rawMessage
+        }
+        val chosenSender = when {
+            smsIsIncoming && incoming.sender.isNotBlank() -> incoming.sender
+            smsIsExisting && existing.sender.isNotBlank() -> existing.sender
+            existing.sender.isNotBlank() -> existing.sender
+            else -> incoming.sender
+        }
+        val chosenAccount = when {
+            smsIsIncoming && incoming.accountHint.isNotBlank() -> incoming.accountHint
+            smsIsExisting && existing.accountHint.isNotBlank() -> existing.accountHint
+            existing.accountHint.isNotBlank() -> existing.accountHint
+            else -> incoming.accountHint
+        }
+        val chosenPaymentMethod = when {
+            existing.paymentMethod.contains("UPI", ignoreCase = true) || incoming.paymentMethod.contains("UPI", ignoreCase = true) -> "UPI"
+            existing.paymentMethod.isNotBlank() -> existing.paymentMethod
+            else -> incoming.paymentMethod
+        }
+        val chosenRef = existing.upiReference.ifBlank { incoming.upiReference }
+        val chosenNote = existing.note.ifBlank { incoming.note }
+        val chosenOccurredAt = when {
+            smsIsIncoming -> incoming.occurredAt
+            smsIsExisting -> existing.occurredAt
+            else -> minOf(existing.occurredAt, incoming.occurredAt)
+        }
+        val cluster = "cross-source-${existing.id}-${chosenOccurredAt / 60000}"
+
+        val values = ContentValues().apply {
+            put("type", chosenType); put("category", chosenCategory); put("merchant", chosenMerchant); put("normalized_merchant", chosenNormalized)
+            put("note", chosenNote); put("source", chosenSource); put("raw_message", chosenRaw); put("sender", chosenSender)
+            put("payment_method", chosenPaymentMethod); put("account_hint", chosenAccount); put("upi_reference", chosenRef)
+            put("classification_method", chosenMethod); put("classification_confidence", chosenConfidence)
+            put("review_status", "accepted"); put("dedup_cluster", cluster); put("occurred_at", chosenOccurredAt)
+        }
+        writableDatabase.update("transactions", values, "id=?", arrayOf(existing.id.toString()))
+
+        // A correction learned from either source should also teach the alternate merchant wording.
+        if (chosenMethod == "user_corrected") {
+            setOf(existing.merchant, incoming.merchant, chosenMerchant).forEach { merchantText ->
+                val keyword = normalizeMerchant(merchantText).trim().lowercase(Locale.ROOT)
+                if (keyword.length >= 3 && !keyword.equals("unknown", ignoreCase = true)) {
+                    val already = readableDatabase.rawQuery(
+                        "SELECT COUNT(*) FROM rules WHERE LOWER(keyword)=? AND is_user_rule=1",
+                        arrayOf(keyword)
+                    ).use { c -> c.moveToFirst() && c.getInt(0) > 0 }
+                    if (!already) {
+                        val rule = ContentValues().apply {
+                            put("merchant", chosenMerchant); put("keyword", keyword); put("type", chosenType); put("category", chosenCategory)
+                            put("is_user_rule", 1); put("enabled", 1); put("created_at", System.currentTimeMillis())
+                        }
+                        writableDatabase.insert("rules", null, rule)
+                    }
+                }
+            }
+        }
     }
 
     fun insertTransaction(tx: ParsedTransaction, source: String): Long {
         val normalized = normalizeMerchant(tx.merchant)
-        if (likelyDuplicate(tx, source, normalized)) return -2L
+        val duplicate = findDuplicateCandidate(tx, source, normalized)
+        if (duplicate != null) {
+            mergeDuplicate(duplicate, tx, source, normalized)
+            return -2L
+        }
         val v = ContentValues().apply {
             put("amount", tx.amount); put("type", tx.type); put("category", tx.category); put("merchant", tx.merchant)
             put("normalized_merchant", normalized); put("note", tx.note); put("source", source); put("raw_message", tx.rawMessage)

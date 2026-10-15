@@ -133,16 +133,10 @@ class NativeBridge {
       });
 
   static Future<UpiResult> startUpiPayment({
-    required String upiId,
-    required String payeeName,
-    required double amount,
-    required String note,
+    required String paymentUri,
   }) async {
     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('startUpiPayment', {
-      'upiId': upiId,
-      'payeeName': payeeName,
-      'amount': amount.toStringAsFixed(2),
-      'note': note,
+      'paymentUri': paymentUri,
     });
     return UpiResult.fromMap(raw);
   }

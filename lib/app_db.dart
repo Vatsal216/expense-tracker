@@ -25,7 +25,7 @@ class AppDb {
     final path = p.join(await getDatabasesPath(), 'expense_tracker.db');
     return openDatabase(
       path,
-      version: 6,
+      version: 7,
       onConfigure: (db) async => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, version) async {
         await _createSchema(db);
@@ -128,6 +128,16 @@ class AppDb {
       original_category TEXT NOT NULL DEFAULT '',
       final_category TEXT NOT NULL DEFAULT '',
       action TEXT NOT NULL DEFAULT 'corrected',
+      created_at INTEGER NOT NULL
+    )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS recurring_rules(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      merchant_key TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      frequency TEXT NOT NULL DEFAULT 'Monthly',
+      enabled INTEGER NOT NULL DEFAULT 1,
       created_at INTEGER NOT NULL
     )''');
     await db.execute('''CREATE TABLE IF NOT EXISTS net_worth_items(
@@ -316,7 +326,7 @@ class AppDb {
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
-  Future<void> updateTransaction(int id, {required String type, required String category, required String merchant, required String note}) async {
+  Future<void> updateTransaction(int id, {required String type, required String category, required String merchant, required String note, bool learnRule = true}) async {
     final db = await database;
     final before = await transactionById(id);
     final normalized = await normalizedMerchant(merchant);
@@ -331,7 +341,7 @@ class AppDb {
         'final_category': category, 'action': 'corrected', 'created_at': DateTime.now().millisecondsSinceEpoch,
       });
     }
-    final learn = await getBoolSetting('learn_from_corrections', fallback: true);
+    final learn = learnRule && await getBoolSetting('learn_from_corrections', fallback: true);
     final keyword = normalized.trim().toLowerCase();
     const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
     if (learn && keyword.length >= 3 && !generic.contains(keyword)) {
@@ -340,6 +350,167 @@ class AppDb {
       final values = {'merchant': normalized, 'keyword': keyword, 'type': type, 'category': category, 'is_user_rule': 1, 'enabled': 1, 'created_at': now};
       if (existing.isEmpty) { await db.insert('rules', values); } else { await db.update('rules', values, where: 'id=?', whereArgs: [existing.first['id']]); }
     }
+  }
+
+  Future<int> countSimilarTransactions(TxRecord source) async {
+    if (source.id == null) return 0;
+    final db = await database;
+    final normalized = source.normalizedMerchant.trim().isNotEmpty
+        ? source.normalizedMerchant.trim()
+        : await normalizedMerchant(source.merchant);
+    final key = normalized.toLowerCase().trim();
+    const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
+    if (key.length < 3 || generic.contains(key)) return 0;
+    final rows = await db.rawQuery('''
+      SELECT COUNT(*) AS c FROM transactions
+      WHERE review_status IN ('accepted','needs_review') AND id<>?
+        AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?)
+        AND ((type=? AND category=?) OR category='Uncategorized')
+    ''', [source.id, key, key, source.type, source.category]);
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  Future<int> applyCorrectionToSimilar({
+    required TxRecord source,
+    required String type,
+    required String category,
+    required String merchant,
+  }) async {
+    if (source.id == null) return 0;
+    final db = await database;
+    final normalized = await normalizedMerchant(merchant);
+    final sourceNormalized = source.normalizedMerchant.trim().isNotEmpty
+        ? source.normalizedMerchant.trim()
+        : await normalizedMerchant(source.merchant);
+    final key = sourceNormalized.toLowerCase().trim();
+    const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
+    if (key.length < 3 || generic.contains(key)) return 0;
+
+    final changed = await db.update(
+      'transactions',
+      {
+        'type': type,
+        'category': category,
+        'merchant': merchant.trim().isEmpty ? normalized : merchant.trim(),
+        'normalized_merchant': normalized,
+        'classification_method': 'user_bulk_rule',
+        'classification_confidence': 1.0,
+        'review_status': 'accepted',
+      },
+      where: "review_status IN ('accepted','needs_review') AND id<>? AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?) AND ((type=? AND category=?) OR category='Uncategorized')",
+      whereArgs: [source.id, key, key, source.type, source.category],
+    );
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final existing = await db.query('rules', columns: ['id'], where: 'keyword=? AND is_user_rule=1', whereArgs: [key], limit: 1);
+    final values = {
+      'merchant': normalized,
+      'keyword': key,
+      'type': type,
+      'category': category,
+      'is_user_rule': 1,
+      'enabled': 1,
+      'created_at': now,
+    };
+    if (existing.isEmpty) {
+      await db.insert('rules', values);
+    } else {
+      await db.update('rules', values, where: 'id=?', whereArgs: [existing.first['id']]);
+    }
+    return changed;
+  }
+
+  Future<List<Map<String, Object?>>> recurringRules() async {
+    final db = await database;
+    return db.query('recurring_rules', where: 'enabled=1', orderBy: 'name COLLATE NOCASE');
+  }
+
+  Future<void> saveRecurringRuleFromTransaction(TxRecord tx, {String frequency = 'Monthly'}) async {
+    final db = await database;
+    final normalized = tx.normalizedMerchant.trim().isNotEmpty
+        ? tx.normalizedMerchant.trim()
+        : await normalizedMerchant(tx.merchant);
+    final key = normalized.toLowerCase().trim();
+    if (key.length < 2) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await db.insert(
+      'recurring_rules',
+      {
+        'name': normalized,
+        'merchant_key': key,
+        'type': tx.type,
+        'category': tx.category,
+        'frequency': frequency,
+        'enabled': 1,
+        'created_at': now,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> deleteRecurringRule(int id) async {
+    final db = await database;
+    await db.delete('recurring_rules', where: 'id=?', whereArgs: [id]);
+  }
+
+  int _recurringNextDue(int lastMs, String frequency) {
+    DateTime advance(DateTime value) => switch (frequency.toLowerCase()) {
+          'weekly' => value.add(const Duration(days: 7)),
+          'quarterly' => DateTime(value.year, value.month + 3, value.day),
+          'yearly' => DateTime(value.year + 1, value.month, value.day),
+          _ => DateTime(value.year, value.month + 1, value.day),
+        };
+    var next = advance(DateTime.fromMillisecondsSinceEpoch(lastMs));
+    final today = DateTime.now().subtract(const Duration(days: 1));
+    while (next.isBefore(today)) {
+      next = advance(next);
+    }
+    return next.millisecondsSinceEpoch;
+  }
+
+  Future<List<Map<String, Object?>>> userRecurringSummaries() async {
+    final db = await database;
+    final rules = await recurringRules();
+    final out = <Map<String, Object?>>[];
+    for (final rule in rules) {
+      final key = '${rule['merchant_key'] ?? ''}'.toLowerCase();
+      final rows = await db.query(
+        'transactions',
+        where: "review_status='accepted' AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?) AND type=?",
+        whereArgs: [key, key, rule['type']],
+        orderBy: 'occurred_at DESC',
+        limit: 24,
+      );
+      if (rows.isEmpty) {
+        out.add({...rule, 'occurrences': 0, 'averageAmount': 0.0, 'lastPaid': 0, 'nextDue': 0});
+        continue;
+      }
+      final amounts = rows.map((e) => (e['amount'] as num).toDouble()).toList();
+      final avg = amounts.fold<double>(0, (a, b) => a + b) / amounts.length;
+      final lastMs = (rows.first['occurred_at'] as num).toInt();
+      out.add({
+        ...rule,
+        'occurrences': rows.length,
+        'averageAmount': avg,
+        'lastPaid': lastMs,
+        'nextDue': _recurringNextDue(lastMs, '${rule['frequency'] ?? 'Monthly'}'),
+      });
+    }
+    out.sort((a, b) => ((a['nextDue'] as num?)?.toInt() ?? 0).compareTo((b['nextDue'] as num?)?.toInt() ?? 0));
+    return out;
+  }
+
+  Future<List<TxRecord>> recurringTransactionsForRule(Map<String, Object?> rule, {int limit = 200}) async {
+    final db = await database;
+    final key = '${rule['merchant_key'] ?? ''}'.toLowerCase();
+    final rows = await db.query(
+      'transactions',
+      where: "review_status='accepted' AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?) AND type=?",
+      whereArgs: [key, key, rule['type']],
+      orderBy: 'occurred_at DESC',
+      limit: limit,
+    );
+    return rows.map(TxRecord.fromMap).toList();
   }
 
   Future<void> acceptReview(int id) async {
@@ -445,13 +616,14 @@ class AppDb {
     return totals;
   }
 
-  Future<List<TxRecord>> searchTransactions({String query='', String type='all', String category='', String source='', String account='', double? minAmount, double? maxAmount, int? startMs, int? endMs, int limit=500}) async {
+  Future<List<TxRecord>> searchTransactions({String query='', String type='all', String category='', String merchant='', String source='', String account='', double? minAmount, double? maxAmount, int? startMs, int? endMs, int limit=500}) async {
     final db = await database;
     final clauses = <String>["review_status='accepted'"];
     final args = <Object?>[];
     if (query.trim().isNotEmpty) { clauses.add('(merchant LIKE ? OR normalized_merchant LIKE ? OR note LIKE ? OR raw_message LIKE ? OR sender LIKE ?)'); final q='%${query.trim()}%'; args.addAll([q,q,q,q,q]); }
     if (type != 'all') { clauses.add('type=?'); args.add(type); }
-    if (category.isNotEmpty) { clauses.add('category=?'); args.add(category); }
+    if (category.isNotEmpty) { clauses.add('(category=? OR id IN (SELECT transaction_id FROM transaction_splits WHERE category=?))'); args.addAll([category, category]); }
+    if (merchant.isNotEmpty) { clauses.add('(LOWER(normalized_merchant)=? OR LOWER(merchant)=?)'); final m=merchant.toLowerCase(); args.addAll([m,m]); }
     if (source.isNotEmpty) { clauses.add('source=?'); args.add(source); }
     if (account.isNotEmpty) { clauses.add('(account_hint=? OR sender||\'|\'||account_hint=?)'); args.addAll([account,account]); }
     if (minAmount != null) { clauses.add('amount>=?'); args.add(minAmount); }
@@ -503,6 +675,113 @@ class AppDb {
       'projectedExpense': projected,
       'savingsRate': savingsRate,
     };
+  }
+
+  Future<Map<String, Object?>> safeToSpendSnapshot() async {
+    final now = DateTime.now();
+    final monthStart = DateTime(now.year, now.month, 1).millisecondsSinceEpoch;
+    final monthEndDate = DateTime(now.year, now.month + 1, 1);
+    final monthEnd = monthEndDate.millisecondsSinceEpoch;
+    final totals = await totalsByTypeForPeriod(monthStart, monthEnd);
+    final budget = await overallBudget();
+    final expense = totals['expense'] ?? 0.0;
+    final refund = totals['refund'] ?? 0.0;
+    final income = totals['income'] ?? 0.0;
+    final investment = totals['investment'] ?? 0.0;
+    final netExpense = math.max(0.0, expense - refund);
+
+    var upcomingBills = 0.0;
+    final recurring = await userRecurringSummaries();
+    for (final item in recurring) {
+      final type = '${item['type'] ?? ''}';
+      final nextDue = (item['nextDue'] as num?)?.toInt() ?? 0;
+      final amount = (item['averageAmount'] as num?)?.toDouble() ?? 0.0;
+      if (type == 'expense' && nextDue >= now.millisecondsSinceEpoch && nextDue < monthEnd) {
+        upcomingBills += amount;
+      }
+    }
+
+    final daysRemaining = math.max(1, monthEndDate.difference(DateTime(now.year, now.month, now.day)).inDays);
+    final hasBudget = budget > 0;
+    final hasIncome = income > 0;
+    final basis = hasBudget ? budget : (income + refund);
+    final safe = math.max(0.0, hasBudget ? (budget - netExpense - upcomingBills) : (basis - netExpense - investment - upcomingBills));
+    final dailySafe = safe / daysRemaining;
+    final mode = hasBudget ? 'budget' : (hasIncome ? 'cashflow' : 'insufficient');
+
+    return {
+      'safe': safe,
+      'dailySafe': dailySafe,
+      'budget': budget,
+      'income': income,
+      'expense': expense,
+      'refund': refund,
+      'investment': investment,
+      'upcomingBills': upcomingBills,
+      'daysRemaining': daysRemaining,
+      'mode': mode,
+    };
+  }
+
+  Future<List<String>> whatChangedInsights() async {
+    final now = DateTime.now();
+    final currentStart = DateTime(now.year, now.month, 1).millisecondsSinceEpoch;
+    final currentEnd = DateTime(now.year, now.month, now.day + 1).millisecondsSinceEpoch;
+    final previousDate = DateTime(now.year, now.month - 1, 1);
+    final previousStart = previousDate.millisecondsSinceEpoch;
+    final previousLastDay = DateTime(previousDate.year, previousDate.month + 1, 0).day;
+    final previousEndDay = math.min(now.day + 1, previousLastDay + 1).toInt();
+    final previousEnd = DateTime(previousDate.year, previousDate.month, previousEndDay).millisecondsSinceEpoch;
+
+    final currentTotals = await totalsByTypeForPeriod(currentStart, currentEnd);
+    final previousTotals = await totalsByTypeForPeriod(previousStart, previousEnd);
+    final currentExpense = currentTotals['expense'] ?? 0.0;
+    final previousExpense = previousTotals['expense'] ?? 0.0;
+    final insights = <String>[];
+
+    if (previousExpense > 0) {
+      final delta = currentExpense - previousExpense;
+      final pct = (delta.abs() / previousExpense) * 100;
+      if (pct >= 5) {
+        insights.add(delta > 0
+            ? 'Spending is ${pct.round()}% higher than last month (${_compactMoney(delta.abs())} more).'
+            : 'Spending is ${pct.round()}% lower than last month (${_compactMoney(delta.abs())} less).');
+      } else {
+        insights.add('Overall spending is almost unchanged from last month.');
+      }
+    } else if (currentExpense > 0) {
+      insights.add('This is your first month with enough spending history for comparison.');
+    }
+
+    final currentCategories = await expenseByCategoryForPeriod(currentStart, currentEnd);
+    final previousCategories = await expenseByCategoryForPeriod(previousStart, previousEnd);
+    if (currentCategories.isNotEmpty) {
+      final top = currentCategories.entries.first;
+      final before = previousCategories[top.key] ?? 0.0;
+      final delta = top.value - before;
+      if (before > 0 && delta.abs() >= 100) {
+        insights.add('${top.key} is your top category at ${_compactMoney(top.value)}, ${delta > 0 ? 'up' : 'down'} ${_compactMoney(delta.abs())} vs last month.');
+      } else {
+        insights.add('${top.key} is your largest category this month at ${_compactMoney(top.value)}.');
+      }
+    }
+
+    final merchants = await expenseByMerchantForPeriod(currentStart, currentEnd, limit: 1);
+    if (merchants.isNotEmpty) {
+      final top = merchants.entries.first;
+      insights.add('${top.key} is your highest-spend merchant this month at ${_compactMoney(top.value)}.');
+    }
+
+
+    return insights.take(4).toList();
+  }
+
+  String _compactMoney(double value) {
+    final abs = value.abs();
+    if (abs >= 10000000) return '₹${(value / 10000000).toStringAsFixed(1)}Cr';
+    if (abs >= 100000) return '₹${(value / 100000).toStringAsFixed(1)}L';
+    if (abs >= 1000) return '₹${(value / 1000).toStringAsFixed(1)}K';
+    return '₹${value.round()}';
   }
 
   Future<List<Map<String, Object?>>> detectRecurringPayments() async {
@@ -655,15 +934,6 @@ class AppDb {
         out.add({'kind':'anomaly','title':'${c.name} spending is unusually high','message':'Last 7 days are ${((current/weeklyAvg-1)*100).round()}% above your recent weekly average.','value':current});
       }
     }
-    final budget = await overallBudget();
-    final cash = await cashFlowSummary();
-    final projected = cash['projectedExpense'] ?? 0;
-    if (budget > 0 && projected > budget) out.add({'kind':'forecast','title':'Budget may be exceeded','message':'At the current pace, spending may reach ₹${projected.round()} vs ₹${budget.round()} budget.','value':projected-budget});
-    final recurring = await detectRecurringPayments();
-    final sevenDays = DateTime.now().add(const Duration(days: 7)).millisecondsSinceEpoch;
-    for (final r in recurring.where((e)=>(e['nextDue'] as int)<=sevenDays).take(3)) {
-      out.add({'kind':'recurring','title':'Upcoming ${r['merchant']}','message':'Around ₹${(r['averageAmount'] as double).round()} expected in the next 7 days.','value':r['averageAmount']});
-    }
     return out;
   }
 
@@ -732,23 +1002,191 @@ class AppDb {
 
   Future<Map<String,int>> smartDeduplicate() async {
     if (!await getBoolSetting('smart_dedup_enabled', fallback: true)) return {'ignored': 0, 'kept': 0};
-    final db=await database;
-    final rows=await db.query('transactions',where:"review_status='accepted'",orderBy:'occurred_at ASC');
-    var removed=0; final keep=<int>[];
-    for(final r in rows){
-      final id=r['id'] as int; bool duplicate=false;
-      for(final kid in keep.reversed.take(50)){
-        final k=rows.firstWhere((x)=>x['id']==kid);
-        final diff=((r['occurred_at'] as int)-(k['occurred_at'] as int)).abs(); if(diff>5*60*1000) continue;
-        if(((r['amount'] as num).toDouble()-(k['amount'] as num).toDouble()).abs()>0.01) continue;
-        final ref=(r['upi_reference'] as String?)??''; final kref=(k['upi_reference'] as String?)??'';
-        final rm=((r['normalized_merchant'] as String?)?.isNotEmpty==true?r['normalized_merchant']:r['merchant']).toString().toLowerCase();
-        final km=((k['normalized_merchant'] as String?)?.isNotEmpty==true?k['normalized_merchant']:k['merchant']).toString().toLowerCase();
-        if((ref.isNotEmpty && ref==kref) || (rm==km && r['source']!=k['source'])) { duplicate=true; break; }
-      }
-      if(duplicate){ await db.update('transactions',{'review_status':'ignored','dedup_cluster':'smart-duplicate'},where:'id=?',whereArgs:[id]); removed++; } else { keep.add(id); }
+    final db = await database;
+    final rows = await db.query(
+      'transactions',
+      where: "review_status='accepted' AND source IN ('sms','phonepe_notification')",
+      orderBy: 'occurred_at ASC',
+    );
+    if (rows.length < 2) return {'ignored': 0, 'kept': rows.length};
+
+    bool isNotificationSource(String source) => source.endsWith('_notification');
+    bool userCorrected(Map<String, Object?> row) => row['classification_method'] == 'user_corrected';
+    String textValue(Map<String, Object?> row, String key) => (row[key] as String?)?.trim() ?? '';
+    double amountValue(Map<String, Object?> row) => (row['amount'] as num).toDouble();
+    int timeValue(Map<String, Object?> row) => (row['occurred_at'] as num).toInt();
+
+    bool upiLike(Map<String, Object?> row) {
+      final text = '${textValue(row, 'payment_method')} ${textValue(row, 'raw_message')} ${textValue(row, 'merchant')}'.toLowerCase();
+      return const ['upi', 'gpay', 'google pay', 'phonepe', 'paytm', '@ybl', '@ibl', '@ok', '@upi']
+          .any(text.contains);
     }
-    return {'ignored':removed,'kept':keep.length};
+
+    double classificationRank(Map<String, Object?> row) {
+      final method = textValue(row, 'classification_method');
+      final category = textValue(row, 'category');
+      final confidence = ((row['classification_confidence'] as num?) ?? 0).toDouble().clamp(0.0, 1.0).toDouble();
+      final base = switch (method) {
+        'user_corrected' => 100.0,
+        'notification_action' => 95.0,
+        'upi_intent' => 90.0,
+        'merchant_rule' => 85.0,
+        'context_override' => 78.0,
+        'hard_gate' => 75.0,
+        'neural' => 65.0,
+        _ => 50.0,
+      };
+      return base + (category.isNotEmpty && category.toLowerCase() != 'uncategorized' ? 20.0 : 0.0) + confidence;
+    }
+
+    int merchantScore(String merchant) {
+      final m = merchant.trim();
+      if (m.isEmpty) return -100;
+      final lower = m.toLowerCase();
+      var score = 20;
+      if (const ['unknown', 'phonepe', 'google pay', 'gpay', 'paytm'].contains(lower)) score -= 25;
+      if (RegExp(r'^(?:gpay|phonepe|paytm)[-_ ]?\d+', caseSensitive: false).hasMatch(m)) score -= 35;
+      if (RegExp(r'\d{7,}').hasMatch(m)) score -= 12;
+      if (RegExp(r'[A-Za-z]').allMatches(m).length >= 5) score += 10;
+      if (m.contains(' ')) score += 5;
+      return score;
+    }
+
+    bool pairQualifies(Map<String, Object?> a, Map<String, Object?> b) {
+      if ((amountValue(a) - amountValue(b)).abs() > 0.01) return false;
+      final sourceA = textValue(a, 'source');
+      final sourceB = textValue(b, 'source');
+      final crossSource = (sourceA == 'sms' && isNotificationSource(sourceB)) ||
+          (sourceB == 'sms' && isNotificationSource(sourceA));
+      if (!crossSource) return false;
+
+      final diff = (timeValue(a) - timeValue(b)).abs();
+      final refA = textValue(a, 'upi_reference');
+      final refB = textValue(b, 'upi_reference');
+      if (refA.isNotEmpty && refB.isNotEmpty && refA.toLowerCase() == refB.toLowerCase()) return diff <= 10 * 60 * 1000;
+
+      final accountA = textValue(a, 'account_hint');
+      final accountB = textValue(b, 'account_hint');
+      if (accountA.isNotEmpty && accountB.isNotEmpty && accountA != accountB) return false;
+
+      if (!userCorrected(a) && !userCorrected(b) && textValue(a, 'type') != textValue(b, 'type')) return false;
+
+      final merchantA = textValue(a, 'normalized_merchant').isNotEmpty
+          ? textValue(a, 'normalized_merchant')
+          : textValue(a, 'merchant');
+      final merchantB = textValue(b, 'normalized_merchant').isNotEmpty
+          ? textValue(b, 'normalized_merchant')
+          : textValue(b, 'merchant');
+      final merchantMatch = merchantA.isNotEmpty && merchantA.toLowerCase() == merchantB.toLowerCase();
+      if (merchantMatch && diff <= 5 * 60 * 1000) return true;
+      return upiLike(a) && upiLike(b) && diff <= 3 * 60 * 1000;
+    }
+
+    int pairScore(Map<String, Object?> a, Map<String, Object?> b) {
+      final diff = (timeValue(a) - timeValue(b)).abs();
+      final refA = textValue(a, 'upi_reference');
+      final refB = textValue(b, 'upi_reference');
+      if (refA.isNotEmpty && refB.isNotEmpty && refA.toLowerCase() == refB.toLowerCase()) return 1000000 - diff;
+      final merchantA = textValue(a, 'normalized_merchant').isNotEmpty ? textValue(a, 'normalized_merchant') : textValue(a, 'merchant');
+      final merchantB = textValue(b, 'normalized_merchant').isNotEmpty ? textValue(b, 'normalized_merchant') : textValue(b, 'merchant');
+      if (merchantA.isNotEmpty && merchantA.toLowerCase() == merchantB.toLowerCase()) return 800000 - diff;
+      return 600000 - diff;
+    }
+
+    final used = <int>{};
+    var merged = 0;
+
+    for (var i = 0; i < rows.length; i++) {
+      final a = rows[i];
+      final aid = (a['id'] as num).toInt();
+      if (used.contains(aid)) continue;
+
+      Map<String, Object?>? best;
+      var bestScore = -1 << 62;
+      for (var j = i + 1; j < rows.length; j++) {
+        final b = rows[j];
+        final bid = (b['id'] as num).toInt();
+        if (used.contains(bid)) continue;
+        final diff = (timeValue(a) - timeValue(b)).abs();
+        if (diff > 10 * 60 * 1000 && timeValue(b) > timeValue(a)) break;
+        if (!pairQualifies(a, b)) continue;
+        final score = pairScore(a, b);
+        if (score > bestScore) { best = b; bestScore = score; }
+      }
+      if (best == null) continue;
+
+      final bid = (best['id'] as num).toInt();
+      final sms = textValue(a, 'source') == 'sms' ? a : best;
+      final notification = identical(sms, a) ? best : a;
+      final smsId = (sms['id'] as num).toInt();
+      final notificationId = (notification['id'] as num).toInt();
+
+      final bestClassification = classificationRank(a) >= classificationRank(best) ? a : best;
+      final merchantA = textValue(a, 'merchant');
+      final merchantB = textValue(best, 'merchant');
+      final smsMerchant = textValue(sms, 'merchant');
+      final chosenMerchant = merchantScore(smsMerchant) >= 0
+          ? smsMerchant
+          : (merchantScore(merchantA) >= merchantScore(merchantB) ? merchantA : merchantB);
+      final chosenNormalized = await normalizedMerchant(chosenMerchant);
+      final cluster = 'cross-source-$smsId-$notificationId';
+
+      final chosenPaymentMethod = textValue(a, 'payment_method').toLowerCase().contains('upi') ||
+              textValue(best, 'payment_method').toLowerCase().contains('upi')
+          ? 'UPI'
+          : (textValue(sms, 'payment_method').isNotEmpty ? textValue(sms, 'payment_method') : textValue(notification, 'payment_method'));
+
+      await db.update('transactions', {
+        'type': textValue(bestClassification, 'type'),
+        'category': textValue(bestClassification, 'category'),
+        'merchant': chosenMerchant,
+        'normalized_merchant': chosenNormalized,
+        'note': textValue(sms, 'note').isNotEmpty ? textValue(sms, 'note') : textValue(notification, 'note'),
+        'source': 'sms',
+        'raw_message': textValue(sms, 'raw_message'),
+        'sender': textValue(sms, 'sender'),
+        'payment_method': chosenPaymentMethod,
+        'account_hint': textValue(sms, 'account_hint').isNotEmpty ? textValue(sms, 'account_hint') : textValue(notification, 'account_hint'),
+        'upi_reference': textValue(sms, 'upi_reference').isNotEmpty ? textValue(sms, 'upi_reference') : textValue(notification, 'upi_reference'),
+        'classification_method': textValue(bestClassification, 'classification_method'),
+        'classification_confidence': bestClassification['classification_confidence'] ?? 1.0,
+        'dedup_cluster': cluster,
+        'review_status': 'accepted',
+      }, where: 'id=?', whereArgs: [smsId]);
+
+      await db.update('transactions', {
+        'review_status': 'ignored',
+        'dedup_cluster': cluster,
+      }, where: 'id=?', whereArgs: [notificationId]);
+
+      // A learned correction from either source should also teach the alternate merchant wording.
+      if (textValue(bestClassification, 'classification_method') == 'user_corrected') {
+        for (final merchantText in <String>{merchantA, merchantB, chosenMerchant}) {
+          final learnedKeyword = (await normalizedMerchant(merchantText)).trim();
+          if (learnedKeyword.length < 3 || learnedKeyword.toLowerCase() == 'unknown') continue;
+          final existingRule = Sqflite.firstIntValue(await db.rawQuery(
+            'SELECT COUNT(*) FROM rules WHERE LOWER(keyword)=? AND is_user_rule=1',
+            [learnedKeyword.toLowerCase()],
+          )) ?? 0;
+          if (existingRule == 0) {
+            await db.insert('rules', {
+              'merchant': chosenMerchant,
+              'keyword': learnedKeyword.toLowerCase(),
+              'type': textValue(bestClassification, 'type'),
+              'category': textValue(bestClassification, 'category'),
+              'is_user_rule': 1,
+              'enabled': 1,
+              'created_at': DateTime.now().millisecondsSinceEpoch,
+            });
+          }
+        }
+      }
+
+      used.addAll([aid, bid]);
+      merged++;
+    }
+
+    return {'ignored': merged, 'kept': rows.length - merged};
   }
 
   Future<Map<String,int>> modelFeedbackStats() async {
@@ -783,18 +1221,18 @@ class AppDb {
 
   Future<Map<String,Object?>> exportSnapshot() async {
     final db=await database;
-    const tables=['transactions','rules','budgets','settings','categories','transaction_splits','accounts','merchant_aliases','review_feedback','net_worth_items'];
-    final data=<String,Object?>{'schema':6,'exportedAt':DateTime.now().toIso8601String()};
+    const tables=['transactions','rules','budgets','settings','categories','transaction_splits','accounts','merchant_aliases','review_feedback','recurring_rules','net_worth_items'];
+    final data=<String,Object?>{'schema':7,'exportedAt':DateTime.now().toIso8601String()};
     for(final table in tables){data[table]=await db.query(table);}
     return data;
   }
 
   Future<void> restoreSnapshot(Map<String,Object?> snapshot) async {
     final db=await database;
-    const tables=['transaction_splits','review_feedback','transactions','rules','budgets','settings','categories','accounts','merchant_aliases','net_worth_items'];
+    const tables=['transaction_splits','review_feedback','transactions','rules','budgets','settings','categories','accounts','merchant_aliases','recurring_rules','net_worth_items'];
     await db.transaction((txn) async {
       for(final table in tables){await txn.delete(table);}
-      final insertionOrder=['categories','settings','budgets','rules','merchant_aliases','accounts','net_worth_items','transactions','transaction_splits','review_feedback'];
+      final insertionOrder=['categories','settings','budgets','rules','merchant_aliases','accounts','recurring_rules','net_worth_items','transactions','transaction_splits','review_feedback'];
       for(final table in insertionOrder){
         final rows=(snapshot[table] as List?)?.cast<Map>()??const[];
         for(final raw in rows){await txn.insert(table,Map<String,Object?>.from(raw),conflictAlgorithm:ConflictAlgorithm.replace);}

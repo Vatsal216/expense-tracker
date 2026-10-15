@@ -212,32 +212,33 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun startUpiPayment(args: Map<*, *>?, result: MethodChannel.Result) {
-        val upiId = args?.get("upiId")?.toString()?.trim().orEmpty()
-        val payeeName = args?.get("payeeName")?.toString()?.trim().orEmpty()
-        val amount = args?.get("amount")?.toString()?.trim().orEmpty()
-        val note = args?.get("note")?.toString()?.trim().orEmpty()
-
-        if (upiId.isBlank() || payeeName.isBlank() || amount.isBlank()) {
-            result.error("INVALID_UPI", "UPI ID, payee name and amount are required.", null)
+        val paymentUri = args?.get("paymentUri")?.toString()?.trim().orEmpty()
+        if (paymentUri.isBlank()) {
+            result.error("INVALID_UPI", "UPI payment URI is required.", null)
             return
         }
 
-        val uri = Uri.Builder()
-            .scheme("upi")
-            .authority("pay")
-            .appendQueryParameter("pa", upiId)
-            .appendQueryParameter("pn", payeeName)
-            .appendQueryParameter("am", amount)
-            .appendQueryParameter("cu", "INR")
-            .appendQueryParameter("tn", note)
-            .build()
+        val uri = try { Uri.parse(paymentUri) } catch (_: Exception) { null }
+        if (uri == null || !uri.scheme.equals("upi", ignoreCase = true) || !uri.host.equals("pay", ignoreCase = true)) {
+            result.error("INVALID_UPI", "Invalid UPI payment URI.", null)
+            return
+        }
 
-        val baseIntent = Intent(Intent.ACTION_VIEW, uri)
+        val upiId = uri.getQueryParameter("pa").orEmpty().trim()
+        if (upiId.isBlank() || !upiId.contains("@")) {
+            result.error("INVALID_UPI", "A valid payee UPI ID is required.", null)
+            return
+        }
+
+        val baseIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+            addCategory(Intent.CATEGORY_BROWSABLE)
+        }
         pendingUpiResult = result
 
         try {
             if (baseIntent.resolveActivity(packageManager) != null) {
-                // Let Android show every compatible installed UPI app (GPay, PhonePe, Paytm, etc.).
+                // Pass the complete QR/UPI URI through unchanged so the selected UPI app
+                // receives merchant/reference fields such as tr, mc, mode, orgid, etc.
                 startActivityForResult(Intent.createChooser(baseIntent, "Choose UPI app"), upiRequestCode)
             } else {
                 pendingUpiResult = null

@@ -1,0 +1,20 @@
+[
+  {
+    "name": "same UPI payment from notification and bank SMS",
+    "notification": {"amount": 570.0, "merchant": "gpay-12205427834", "type": "expense", "category": "Healthcare", "classification_method": "user_corrected", "payment_method": "UPI", "occurred_offset_seconds": 0},
+    "sms": {"amount": 570.0, "merchant": "REKHA MEDICAL S thru UPI", "type": "expense", "category": "Uncategorized", "classification_method": "neural", "payment_method": "UPI", "occurred_offset_seconds": 20},
+    "expected": {"merge": true, "canonical_source": "sms", "category": "Healthcare", "merchant_contains": "REKHA MEDICAL"}
+  },
+  {
+    "name": "same amount but unrelated non-UPI transactions",
+    "notification": {"amount": 500.0, "merchant": "Reminder", "type": "expense", "payment_method": "Other", "occurred_offset_seconds": 0},
+    "sms": {"amount": 500.0, "merchant": "Cash withdrawal", "type": "expense", "payment_method": "Bank", "occurred_offset_seconds": 30},
+    "expected": {"merge": false}
+  },
+  {
+    "name": "conflicting account hints",
+    "notification": {"amount": 250.0, "merchant": "PhonePe", "type": "expense", "payment_method": "UPI", "account_hint": "1111", "occurred_offset_seconds": 0},
+    "sms": {"amount": 250.0, "merchant": "Merchant via UPI", "type": "expense", "payment_method": "UPI", "account_hint": "2222", "occurred_offset_seconds": 15},
+    "expected": {"merge": false}
+  }
+]

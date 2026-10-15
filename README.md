@@ -1,118 +1,54 @@
-# v16 Simplified Navigation
+# Expense Tracker v21 — Money Map + AI Financial Coach
 
-This release keeps all underlying finance features while simplifying where they appear:
-- Removed the user-facing Accounts entry from More tools. Detected account hints remain internal for transfer matching/dedup only.
-- Moved Recurring payments to the Home screen with a compact upcoming-payments preview and View all.
-- Removed the duplicate Recurring entry from More tools.
-- Renamed Smart Finance Hub to More tools.
-- Home no longer duplicates the More tools launcher.
-- Net Worth is optional/manual only; SMS-detected account hints do not silently contribute balances.
-- Existing v15 stability/UI fixes and v14 classifier fixes remain included.
+v21 builds on the v20 cross-source deduplication release and keeps the product local-first and user-controlled.
 
-# Expense Tracker — Smart Finance Edition
+## New in v21
 
-Local-first Flutter Android personal-finance app. Transactions are detected from incoming bank/payment SMS and supported payment notifications, classified on-device, deduplicated, and stored in SQLite. No backend is required.
+### Money Map on Home
+- Home now shows a compact **Money Map** for the currently selected dashboard period.
+- Spending and investing are deliberately separated.
+- Spending areas show totals and percentage share. When a stored category is Uncategorized, v21 uses conservative local merchant/message heuristics to infer areas such as Healthcare, Food & Dining, Groceries, Transport, Travel, Shopping, EMI & Loans, Bills & Utilities, Subscriptions, Education, Entertainment, Housing or Cash.
+- Investment areas are inferred locally from recorded category / merchant / transaction text.
+- Common investment areas include Mutual Funds, Defence, Banking & Financials, Healthcare, IT & Technology, Automobile, Energy, Metals, Gold and Deposits.
+- Unclear investments remain **Other / unidentified** rather than being forced into a sector.
+- Expense rows can open the exact filtered transactions for that period.
+- **View report** opens a full Money Map page with Month / Week / Custom filters.
+- The full report contains Spending areas, Investment areas and Investment types.
 
-## Core tracking
+### AI Financial Coach
+- New Home card for local financial behavior analysis.
+- Forecasts likely month-end expense from the current daily spending pace.
+- Compares the forecast with up to three recent completed months.
+- Detects a conservative savings opportunity only in non-protected / discretionary categories.
+- Fixed / essential areas such as EMI, loans, rent, insurance, healthcare, education and utilities are excluded from automatic cut suggestions.
+- Shows merchant concentration when one merchant is a significant share of monthly expenses.
+- Shows investment concentration as a descriptive fact, never a buy/sell recommendation.
+- A detailed **See analysis** page explains the forecast, recent monthly average and savings estimate.
+- All calculations run from structured local transactions. Raw SMS is not sent to a cloud AI service.
 
-- Incoming SMS transaction detection with Android `BroadcastReceiver`
-- Optional historical SMS import after explicit `READ_SMS` permission
-- PhonePe notification tracking after explicit Notification Access permission
-- Manual transactions
-- UPI payments with notes saved locally before opening the UPI app chooser (Google Pay, PhonePe, Paytm or any compatible installed app)
-- UPI QR scanner with review-before-pay flow
-- Full raw SMS/notification text available from transaction details
-- Local SQLite database and local-only classification
+### Simpler information architecture
+- The old standalone **What changed?** Home section is removed because the Financial Coach now owns behavioral comparisons and forecasting in one place.
+- Financial Inbox remains focused only on uncertain transaction classification.
+- Safe to Spend remains a separate actionable budget/cash-flow metric.
+- Money Map handles allocation/concentration.
+- AI Financial Coach handles behavior, forecast and saving opportunities.
 
-## Hybrid ML classification
+## Retained from v20
 
-The transaction pipeline combines deterministic safety gates, a tiny on-device neural classifier, contextual overrides, merchant rules and confidence thresholds. OTPs, promotional messages, collect requests and future/pending debits such as “will be debited” are filtered before they can become expenses. Low-confidence financial messages are sent to **Needs Review** instead of being silently trusted.
-
-Manual corrections create local merchant overrides and feedback records. The ML Feedback screen summarizes accepted/corrected/reviewed classifications.
-
-## Smart finance enhancements
-
-- Smart transfer matching between detected own-account debit/credit pairs
-- Cross-source duplicate detection across SMS, PhonePe and UPI records
-- Recurring/subscription detection for weekly/monthly/quarterly/yearly patterns
-- Account detection from SMS sender/account hints, with per-account spending
-- Merchant normalization/aliases
-- Advanced search by text, type, category, source, account, amount and date
-- Cash-flow dashboard with savings rate, daily average and projected month spend
-- Spending anomaly detection and budget forecasting
-- Local smart alerts for anomalies, forecasts and upcoming recurring payments
-- Receipt camera/gallery import with on-device ML Kit OCR, tax/date/item-line extraction
-- CSV export and PDF report export
-- Passphrase-protected AES-256-GCM backup/restore
-- Split transactions across categories
-- Needs Review queue for uncertain ML classifications
-- Budget forecasting and recurring-payment insights
-- Biometric/device lock
-- Screenshots enabled during the current UI QA/stability cycle
-- Light/dark mode
-- Android home-screen spending widget
-- Notification actions: Food, Shopping, Transfer, Ignore
-- Net-worth tracking for assets, liabilities and selected account balances
-
-## Privacy
-
-SMS, notifications, receipts, notes, classifications, budgets and backup data stay on the device unless the user explicitly exports/shares them. The app does not require a server.
-
-Android SMS permissions are restricted for Google Play distribution. A sideloaded/internal build can request them normally, but publishing through Google Play requires compliance with Google Play's SMS/Call Log permission policy.
+- SMS + payment-app notification cross-source deduplication
+- learned category/type preservation during duplicate merges
+- existing-duplicate cleanup on startup
+- user-controlled recurring payments
+- "Only this" vs "All similar + future" correction learning
+- Total / Month / Week / Day / Custom Home periods
+- period-aware Recent Activity and View All
+- clickable Reports
+- screenshot blocking disabled during QA
+- multi-app UPI chooser and QR compatibility improvements
+- spam / stock-tip filtering
+- credit-card bill payment handling
+- pending SIP / failed reversal handling
 
 ## Build
 
-This repository includes `.github/workflows/build-apk.yml`. Push the extracted project contents to the repository root and GitHub Actions will build a debug APK.
-
-The workflow creates a fresh Android Flutter shell, restores this project's `lib`, `pubspec.yaml`, and `android/app/src/main`, then runs `flutter pub get` and `flutter build apk --debug`.
-
-## Important permissions
-
-- `RECEIVE_SMS` — incoming transaction SMS
-- `READ_SMS` — optional historical SMS import
-- `POST_NOTIFICATIONS` — transaction/budget/smart alerts
-- Notification listener access — optional PhonePe notification tracking
-- `CAMERA` — UPI QR and receipt scanning
-- `USE_BIOMETRIC` — optional local app lock
-
-## Project structure
-
-- `lib/main.dart` — main UI, transaction details, QR payment, reports/settings
-- `lib/enhancements.dart` — smart finance hub and advanced features
-- `lib/app_db.dart` — SQLite schema, analytics, smart matching, backup data
-- `lib/models.dart` — data models
-- `lib/native_bridge.dart` — Flutter ↔ Android method channel
-- `android/app/src/main/kotlin/...` — SMS receiver, notification listener, hybrid parser, notifications, widget and UPI integration
-- `ml/` and `tools/` — tiny classifier samples/training utility
-
-
-## v13 classification/report fixes
-- Pending/future debits such as “will be debited” are excluded from transactions and reports.
-- Failed/reversed notices without a confirmed credit (for example insufficient-balance SIP reversals) are ignored as no-cash-movement events.
-- Existing imported SMS can be reclassified from Settings, and one cleanup pass runs after upgrade.
-- Report insight cards are responsive on narrow phones; long amounts and merchant/category names no longer collapse vertically.
-- Transaction details preserve paise with two-decimal amount display.
-
-
-## v14 credit-card payment / spam fixes
-- Credit-card bill-payment confirmations such as “payment has been received towards your ... Credit Card” are hard-classified as **Transfer → Credit Card Payment**, never Refund/Income/Expense.
-- The transfer keeps the card last-4/account hint and uses payment method **Bank → Credit Card**.
-- Explicit carrier/device spam warnings and stock-tip / option-chain / trading-signal messages are hard-rejected before the neural classifier.
-- Generic refund wording no longer wins by itself; a refund now requires completed refund/credit-back language.
-- Upgrade cleanup key is bumped to v14 so previously imported SMS records are automatically reclassified with these rules.
-- Exact regression examples are stored in `tools/classifier_regression_cases.json` and added to ML training samples.
-
-## v15 stability / UI cleanup
-
-- Screenshot blocking is disabled and any previous persisted secure-screen preference is cleared so UI issues can be captured.
-- Dashboard now has Total / Month / Week / Day filters. Monthly budget progress appears only in the monthly view.
-- UPI payment always opens Android's compatible-app chooser instead of preferring PhonePe.
-- Cash Flow was redesigned to avoid overflow, show transparent Money In/Money Out components, exclude transfers, and separate investments from everyday spending.
-- Savings rate now uses income versus net everyday expenses; investments are treated as a savings allocation rather than ordinary spending.
-- Advanced Search now uses one scroll surface, responsive fields, keyboard-dismiss-on-scroll, a loading state, and spaced result cards.
-- Recurring-payment detection is stricter: normally 3+ completed payments, stable supported intervals, amount consistency, confidence scoring, and explicit recurring hints for limited 2-payment cases.
-- Recurring cards explain confidence, amount variation, frequency and next expected date.
-- Smart Finance list/detail cards have consistent spacing.
-- Main navigation no longer draws page content underneath the bottom navigation bar.
-- Large dashboard/cash-flow figures scale down instead of truncating or overflowing.
-- A v15 stored-SMS reclassification pass runs once after upgrade.
+Upload the **contents of this folder** to the GitHub repository root. The existing GitHub Actions workflow builds the Android APK.
