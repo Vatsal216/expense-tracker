@@ -3996,15 +3996,13 @@ Future<bool> showAddTransaction(BuildContext context) async {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TextField(
-              controller: amount,
-              readOnly: scannedQrHasFixedAmount,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              decoration: InputDecoration(
-                labelText: 'Amount',
-                prefixText: '₹ ',
-                helperText: scannedQrHasFixedAmount ? 'Amount supplied by this QR and kept unchanged for payment compatibility.' : null,
-              ),
-            ),
+                    controller: amount,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Amount',
+                      prefixText: '₹ ',
+                    ),
+                  ),
                   const SizedBox(height: 10),
                   TextField(controller: merchant, decoration: const InputDecoration(labelText: 'Merchant / person')),
                   const SizedBox(height: 10),

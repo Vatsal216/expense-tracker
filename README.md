@@ -52,3 +52,9 @@ v21 builds on the v20 cross-source deduplication release and keeps the product l
 ## Build
 
 Upload the **contents of this folder** to the GitHub repository root. The existing GitHub Actions workflow builds the Android APK.
+
+## v22 build fix
+
+- Fixed the Flutter compile error in `showAddTransaction` where the QR-only state variable `scannedQrHasFixedAmount` was referenced outside `PayScreen`.
+- QR fixed-amount protection remains active only inside the UPI Pay/QR flow, where the state variable is actually defined.
+- The `file_picker` / `share_plus` Built-in Kotlin message from Flutter 3.47 is a dependency migration warning, not the cause of the failed build.

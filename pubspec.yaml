@@ -1,7 +1,7 @@
 name: expense_tracker
 description: Local-first Android expense tracker with SMS/UPI automation and user-controlled finance tools.
 publish_to: "none"
-version: 2.5.0+21
+version: 2.5.1+22
 environment:
   sdk: ">=3.10.0 <4.0.0"
 
