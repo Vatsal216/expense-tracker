@@ -2566,25 +2566,18 @@ class _PayUpiPageState extends State<PayUpiPage> {
   }
 
   String _buildUpiUri(double? value) {
+    // QR payloads may include merchant-specific or signed fields. Never rewrite
+    // or re-encode any scanned UPI URI; even optional fields may be significant.
     final raw = scannedRawQr?.trim();
-    if (raw != null && raw.isNotEmpty) {
+    if (scannedQr && raw != null && raw.isNotEmpty) {
       final original = Uri.tryParse(raw);
-      if (original != null && original.scheme.toLowerCase() == 'upi' && original.host.toLowerCase() == 'pay') {
-        final hasSignature = (original.queryParameters['sign'] ?? '').trim().isNotEmpty;
-        // A provider-signed QR (for example a Paytm merchant QR) must be forwarded
-        // byte-for-byte. Rebuilding/re-encoding its query can invalidate the signature.
-        if (hasSignature) return raw;
-
-        final params = <String, String>{...original.queryParameters};
-        if ((params['am'] ?? '').trim().isEmpty && value != null && value > 0) {
-          params['am'] = value.toStringAsFixed(2);
-        }
-        if (!params.containsKey('tn') && note.text.trim().isNotEmpty) {
-          params['tn'] = note.text.trim();
-        }
-        if ((params['cu'] ?? '').trim().isEmpty) params['cu'] = 'INR';
-        return original.replace(queryParameters: params).toString();
+      if (original == null ||
+          original.scheme.toLowerCase() != 'upi' ||
+          original.host.toLowerCase() != 'pay' ||
+          (original.queryParameters['pa'] ?? '').trim().isEmpty) {
+        throw const FormatException('The scanned QR is not a valid UPI payment request.');
       }
+      return raw;
     }
 
     if (value == null || value <= 0) {
@@ -2598,6 +2591,35 @@ class _PayUpiPageState extends State<PayUpiPage> {
     };
     if (note.text.trim().isNotEmpty) params['tn'] = note.text.trim();
     return Uri(scheme: 'upi', host: 'pay', queryParameters: params).toString();
+  }
+
+  Future<void> _showProviderFallback() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Payment not confirmed'),
+        content: const Text(
+          'Some UPI apps restrict payments initiated by other apps. '
+          'No payment has been recorded. Open PhonePe or Paytm directly '
+          'and scan the original QR in that app, or enter the recipient UPI ID. '
+          'Check your bank history before trying again to avoid duplicate payments.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: upi.text.trim()));
+              Navigator.pop(dialogContext);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Recipient UPI ID copied.')),
+              );
+            },
+            child: const Text('Copy UPI ID'),
+          ),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close')),
+        ],
+      ),
+    );
   }
 
   Future<String?> _chooseUpiApp(String paymentUri) async {
@@ -2640,6 +2662,19 @@ class _PayUpiPageState extends State<PayUpiPage> {
         ),
       ),
     );
+  }
+
+  Future<void> _openProviderHome(String provider) async {
+    try {
+      final opened = await NativeBridge.openPaymentApp(provider);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(opened
+          ? '${provider == 'phonepe' ? 'PhonePe' : 'Paytm'} opened. Scan and pay inside the app. Expense Tracker will look for a confirmed bank SMS or available payment notification; opening the app does not confirm payment.'
+          : 'Unable to launch the payment app.')));
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'Payment app not available.')));
+    }
   }
 
   Future<void> pay() async {
@@ -2709,6 +2744,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
             ? 'Payment is pending. Nothing was saved yet; bank SMS/notification will confirm it.'
             : 'Payment not confirmed (${result.status}). Nothing was saved.';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(statusText)));
+        if (result.status != 'pending') await _showProviderFallback();
       }
     } on PlatformException catch (e) {
       if (!mounted) return;
@@ -2718,6 +2754,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
         _ => e.message ?? 'Could not open the UPI app.',
       };
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+      await _showProviderFallback();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not open UPI payment: $e')));
     } finally {
@@ -2852,6 +2889,24 @@ class _PayUpiPageState extends State<PayUpiPage> {
               icon: const Icon(Icons.copy_rounded),
               label: const Text('Copy UPI ID'),
             ),
+            const SizedBox(height: 18),
+            const Text('Open payment app directly', style: TextStyle(fontWeight: FontWeight.w800)),
+            const SizedBox(height: 6),
+            const Text('No UPI ID, amount, or QR is sent. Scan and complete the payment inside your chosen app. Expense Tracker can later detect a confirmed SMS or notification; no automatic payment callback is available.'),
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(child: OutlinedButton.icon(
+                onPressed: paying ? null : () => _openProviderHome('phonepe'),
+                icon: const Icon(Icons.open_in_new_rounded),
+                label: const Text('PhonePe'),
+              )),
+              const SizedBox(width: 8),
+              Expanded(child: OutlinedButton.icon(
+                onPressed: paying ? null : () => _openProviderHome('paytm'),
+                icon: const Icon(Icons.open_in_new_rounded),
+                label: const Text('Paytm'),
+              )),
+            ]),
             const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: paying ? null : pay,

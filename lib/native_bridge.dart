@@ -160,6 +160,11 @@ class NativeBridge {
         .toList();
   }
 
+  /// Opens a payment provider normally; no QR, UPI ID or amount is sent.
+  /// A true result means only that the app was launched.
+  static Future<bool> openPaymentApp(String provider) async =>
+      await _channel.invokeMethod<bool>('openPaymentApp', {'provider': provider}) ?? false;
+
   static Future<UpiResult> startUpiPayment({
     required String paymentUri,
     String? packageName,

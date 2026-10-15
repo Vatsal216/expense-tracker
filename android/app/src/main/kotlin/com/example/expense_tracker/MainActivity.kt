@@ -74,6 +74,7 @@ class MainActivity : FlutterFragmentActivity() {
                 }
                 "getUpiApps" -> getUpiApps(call.arguments as? Map<*, *>, result)
                 "startUpiPayment" -> startUpiPayment(call.arguments as? Map<*, *>, result)
+                "openPaymentApp" -> openPaymentApp(call.arguments as? Map<*, *>, result)
                 else -> result.notImplemented()
             }
         }
@@ -281,6 +282,32 @@ class MainActivity : FlutterFragmentActivity() {
                 .thenBy { (it["name"] as String).lowercase() }
         )
         result.success(apps)
+    }
+
+    // Launch the provider's home screen, not a payment intent. This does not
+    // return a payment result; confirmed bank SMS/notifications are handled separately.
+    private fun openPaymentApp(args: Map<*, *>?, result: MethodChannel.Result) {
+        val provider = args?.get("provider")?.toString()?.lowercase()?.trim().orEmpty()
+        val targetPackage = when (provider) {
+            "phonepe" -> "com.phonepe.app"
+            "paytm" -> "net.one97.paytm"
+            "cred" -> "com.dreamplug.androidapp"
+            else -> {
+                result.error("UNSUPPORTED_APP", "Choose a supported payment app.", null)
+                return
+            }
+        }
+        val intent = packageManager.getLaunchIntentForPackage(targetPackage)
+        if (intent == null) {
+            result.error("APP_NOT_INSTALLED", "The selected payment app is not available.", null)
+            return
+        }
+        try {
+            startActivity(intent)
+            result.success(true) // App opened, NOT payment completed.
+        } catch (e: Exception) {
+            result.error("APP_OPEN_FAILED", e.message, null)
+        }
     }
 
     private fun startUpiPayment(args: Map<*, *>?, result: MethodChannel.Result) {

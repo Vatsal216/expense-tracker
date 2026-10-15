@@ -128,3 +128,8 @@ Upload the **contents of this folder** to the GitHub repository root. The existi
 - Expanded local ML training with discount, coupon, travel-deal, cashback-offer and investment-ad negatives.
 - Existing non-user-corrected SMS are reclassified once on upgrade so old promotional false positives are hidden.
 - User-confirmed corrections remain protected.
+
+
+## Direct PhonePe / Paytm launch
+
+The Pay tab now includes buttons to open PhonePe or Paytm normally without any UPI payment data. Users must scan/pay in that app. No response or payment success is returned by a regular app launch. Successful transactions may be imported only from available bank SMS/notifications; otherwise use manual/receipt entry. The existing UPI intent payment remains optional for compatible apps.

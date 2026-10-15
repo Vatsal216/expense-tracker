@@ -14,6 +14,7 @@
         <package android:name="net.one97.paytm" />
         <package android:name="com.google.android.apps.nbu.paisa.user" />
         <package android:name="com.phonepe.app" />
+        <package android:name="com.dreamplug.androidapp" />
         <package android:name="in.org.npci.upiapp" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
