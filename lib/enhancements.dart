@@ -304,7 +304,8 @@ Future<bool> showMarkRecurringDialog(BuildContext context, TxRecord tx) async {
 }
 
 class RecurringPaymentsPage extends StatefulWidget {
-  const RecurringPaymentsPage({super.key});
+  final bool embedded;
+  const RecurringPaymentsPage({super.key, this.embedded = false});
   @override
   State<RecurringPaymentsPage> createState() => _RecurringPaymentsPageState();
 }
@@ -370,14 +371,8 @@ class _RecurringPaymentsPageState extends State<RecurringPaymentsPage> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Recurring payments')),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: _add,
-          icon: const Icon(Icons.add_rounded),
-          label: const Text('Add recurring'),
-        ),
-        body: FutureBuilder<List<Map<String, Object?>>>(
+  Widget build(BuildContext context) {
+    final content = FutureBuilder<List<Map<String, Object?>>>(
           future: AppDb.instance.userRecurringSummaries(),
           builder: (context, snap) {
             if (!snap.hasData) return const Center(child: CircularProgressIndicator());
@@ -423,8 +418,17 @@ class _RecurringPaymentsPageState extends State<RecurringPaymentsPage> {
               },
             );
           },
-        ),
-      );
+        );
+    return Scaffold(
+      appBar: widget.embedded ? null : AppBar(title: const Text('Recurring payments')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _add,
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Add recurring'),
+      ),
+      body: content,
+    );
+  }
 }
 
 class _RecurringRuleTransactionsPage extends StatelessWidget {
@@ -1161,12 +1165,12 @@ class _ReviewQueuePageState extends State<ReviewQueuePage> {
                     title: const Text('Apply this correction?'),
                     content: Text(
                       similarCount > 0
-                          ? 'There are $similarCount similar existing transaction${similarCount == 1 ? '' : 's'}. Update only this one, or apply the correction to similar transactions and future messages?'
-                          : 'Save only this transaction, or remember the same correction for future similar messages?',
+                          ? 'There are $similarCount existing transaction${similarCount == 1 ? '' : 's'} with the same message pattern. Update only this one, or apply the correction to that pattern and future messages?'
+                          : 'Save only this transaction, or remember the stable message pattern for future matching messages?',
                     ),
                     actions: [
                       TextButton(onPressed: () => Navigator.pop(scopeContext, 'one'), child: const Text('Only this')),
-                      FilledButton(onPressed: () => Navigator.pop(scopeContext, 'all'), child: Text(similarCount > 0 ? 'All similar + future' : 'Remember for future')),
+                      FilledButton(onPressed: () => Navigator.pop(scopeContext, 'all'), child: Text(similarCount > 0 ? 'Same pattern + future' : 'Remember for future')),
                     ],
                   ),
                 );

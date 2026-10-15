@@ -55,7 +55,7 @@ object TransactionParser {
         )
     }
 
-    fun parsePhonePeNotification(db: ExpenseDatabase, title: String, body: String, occurredAt: Long): ParsedTransaction? {
+    fun parsePhonePeNotification(db: ExpenseDatabase, title: String, body: String, occurredAt: Long, appName: String = "PhonePe"): ParsedTransaction? {
         val text = listOf(title, body).filter { it.isNotBlank() }.joinToString(" | ").trim()
         if (text.isBlank()) return null
         val amount = extractAmount(text) ?: return null
@@ -68,7 +68,7 @@ object TransactionParser {
         val merchant = rule?.merchant ?: extractMerchant(text) ?: title.ifBlank { "PhonePe" }
         val note = extractNote(text)
         val upiReference = upiRefRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
-        val fingerprint = fingerprint("phonepe|$amount|${decision.label}|$merchant|${occurredAt / 60000}|$upiReference|$text")
+        val fingerprint = fingerprint("notification|$appName|$amount|${decision.label}|$merchant|${occurredAt / 60000}|$upiReference|$text")
         return ParsedTransaction(
             amount = amount,
             type = decision.label,
@@ -76,8 +76,8 @@ object TransactionParser {
             merchant = merchant,
             note = note,
             rawMessage = text,
-            sender = "PhonePe",
-            paymentMethod = "UPI / PhonePe",
+            sender = appName,
+            paymentMethod = "UPI / $appName",
             accountHint = "",
             upiReference = upiReference,
             occurredAt = occurredAt,

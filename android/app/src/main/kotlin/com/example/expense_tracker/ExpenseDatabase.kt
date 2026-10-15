@@ -224,10 +224,20 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
 
     fun findRule(fullText: String): RuleMatch? {
         val text = fullText.lowercase(Locale.ROOT)
+            .replace(Regex("[^a-z0-9@& ]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
         readableDatabase.rawQuery("SELECT merchant,keyword,type,category FROM rules WHERE enabled=1 ORDER BY is_user_rule DESC,id ASC", null).use { c ->
             while (c.moveToNext()) {
-                val keyword = c.getString(1).lowercase(Locale.ROOT)
-                if (keyword.isNotBlank() && text.contains(keyword)) return RuleMatch(c.getString(0), c.getString(2), c.getString(3), keyword)
+                val keyword = c.getString(1).lowercase(Locale.ROOT).trim()
+                if (keyword.isBlank()) continue
+                // v22 user-learning rules may contain a conjunction such as
+                // "zarivault&&subscription&&autopay". Every stable token must
+                // be present, preventing a broad bank-name rule (e.g. ICICI)
+                // from relabeling unrelated transactions.
+                val parts = keyword.split("&&").map { it.trim() }.filter { it.isNotBlank() }
+                val matches = parts.isNotEmpty() && parts.all { text.contains(it) }
+                if (matches) return RuleMatch(c.getString(0), c.getString(2), c.getString(3), keyword)
             }
         }
         return null

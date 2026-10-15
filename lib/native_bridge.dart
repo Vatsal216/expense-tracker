@@ -6,6 +6,7 @@ class UpiResult {
   final String txnRef;
   final String approvalRefNo;
   final String responseCode;
+  final String appPackage;
   final String raw;
 
   const UpiResult({
@@ -14,6 +15,7 @@ class UpiResult {
     required this.txnRef,
     required this.approvalRefNo,
     required this.responseCode,
+    required this.appPackage,
     required this.raw,
   });
 
@@ -25,7 +27,22 @@ class UpiResult {
         txnRef: '${map?['txnRef'] ?? ''}',
         approvalRefNo: '${map?['approvalRefNo'] ?? ''}',
         responseCode: '${map?['responseCode'] ?? ''}',
+        appPackage: '${map?['appPackage'] ?? ''}',
         raw: '${map?['raw'] ?? ''}',
+      );
+}
+
+class UpiApp {
+  final String packageName;
+  final String name;
+  final bool known;
+
+  const UpiApp({required this.packageName, required this.name, required this.known});
+
+  factory UpiApp.fromMap(Map<dynamic, dynamic> map) => UpiApp(
+        packageName: '${map['packageName'] ?? ''}',
+        name: '${map['name'] ?? 'UPI app'}',
+        known: map['known'] == true,
       );
 }
 
@@ -132,11 +149,24 @@ class NativeBridge {
         'minute': minute,
       });
 
+  static Future<List<UpiApp>> getUpiApps({required String paymentUri}) async {
+    final raw = await _channel.invokeMethod<List<dynamic>>('getUpiApps', {
+      'paymentUri': paymentUri,
+    });
+    return (raw ?? const <dynamic>[])
+        .whereType<Map<dynamic, dynamic>>()
+        .map(UpiApp.fromMap)
+        .where((app) => app.packageName.isNotEmpty)
+        .toList();
+  }
+
   static Future<UpiResult> startUpiPayment({
     required String paymentUri,
+    String? packageName,
   }) async {
     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('startUpiPayment', {
       'paymentUri': paymentUri,
+      if (packageName != null && packageName.trim().isNotEmpty) 'packageName': packageName.trim(),
     });
     return UpiResult.fromMap(raw);
   }

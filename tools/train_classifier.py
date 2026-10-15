@@ -31,7 +31,9 @@ def vectorize(message: str) -> np.ndarray:
     semantic = {
         "__future_pending__": ["will be debited", "scheduled", "upcoming", "due on", "not yet completed"],
         "__otp__": ["otp", "one time password"],
-        "__promo__": ["offer", "loan", "apply now"],
+        "__promo__": ["offer", "special deal", "discount", "coupon", "use code", "book now", "shop now", "buy now", "apply now", "cashback offer", "reward points", "up to rs", "up to inr", "invest now", "start sip", "loan"],
+        "__cta__": ["use code", "promo code", "book now", "shop now", "buy now", "apply now", "redeem now", "avail now", "invest now"],
+        "__movement__": ["debited", "credited", "paid to", "paid successfully", "spent", "charged", "sent", "received from", "withdrawn", "deposited", "transferred", "refund credited", "units allotted", "order executed"],
         "__refund__": ["refund", "refunded", "reversal", "reversed", "returned"],
         "__credit__": ["credited", "received", "salary", "cashback"],
         "__debit__": ["debited", "paid", "spent", "charged", "sent", "payment successful"],
@@ -45,6 +47,12 @@ def vectorize(message: str) -> np.ndarray:
         feats.append("__upi__")
     if "₹" in message or "rs" in text or "inr" in text:
         feats.append("__amount_marker__")
+    if re.search(r"(?:rs\.?|inr|₹)\s*[0-9,]+(?:\.[0-9]{1,2})?\s*(?:off|discount|cashback)", text):
+        feats.append("__discount_amount__")
+    if re.search(r"(?:up to|save|get)\s*(?:rs\.?|inr|₹)\s*[0-9,]+", text):
+        feats.append("__discount_amount__")
+    if re.search(r"(?:up to\s*)?[0-9]{1,3}%\s*(?:off|discount|cashback)", text):
+        feats.append("__discount_percent__")
 
     v = np.zeros(INPUT_SIZE, dtype=np.float32)
     for f in feats:

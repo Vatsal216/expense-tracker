@@ -1,5 +1,5 @@
 {
-  "version": "v14",
+  "version": "v24",
   "cases": [
     {
       "name": "credit_card_bill_payment",
@@ -12,6 +12,32 @@
       "name": "explicit_spam_stock_tip",
       "sms": "Airtel Warning: SPAM | TATAMOTORS option chain metrics signal clean upside expansion; active stock guild credited Rs 8600 to 918989106607. http://fbiem.fintudos.com/jax",
       "expected": "ignore"
+    },
+    {
+      "name": "makemytrip_discount_not_transaction",
+      "sms": "SPECIAL DEAL on domestic flights: Up to Rs.3000 OFF*, Use Code: RWYVSP. Book now - app.mmyt.co/Xm2V/ozj6c7t8 | Team MakeMyTrip",
+      "expected": "ignore"
+    },
+    {
+      "name": "investment_ad_not_investment",
+      "sms": "Start SIP with just Rs 500 per month. Invest now in our top mutual funds and build wealth.",
+      "expected": "ignore"
+    },
+    {
+      "name": "upi_cashback_offer_not_income",
+      "sms": "Pay via UPI today and get Rs 300 cashback. Offer valid for selected users.",
+      "expected": "ignore"
+    },
+    {
+      "name": "valid_debit_still_expense",
+      "sms": "Rs 3000.00 debited from ICICI Bank Savings Account XX373 towards MAKE MY TRIP. Ref 123456789",
+      "expected_type": "expense"
+    },
+    {
+      "name": "valid_sip_still_investment",
+      "sms": "Rs 3000 debited from ICICI Bank Account XX373 for SIP purchase in HDFC Mutual Fund. Units allotted successfully.",
+      "expected_type": "investment",
+      "expected_category": "Mutual Funds"
     }
   ]
 }

@@ -326,6 +326,89 @@ class AppDb {
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
   }
 
+  bool _unsafeBroadRule(String keyword) {
+    final value = keyword.toLowerCase().trim();
+    if (value.contains('&&')) return false;
+    const generic = {
+      'icici', 'icici bank', 'hdfc', 'hdfc bank', 'axis', 'axis bank', 'sbi', 'state bank',
+      'kotak', 'kotak bank', 'yes bank', 'idfc', 'idfc bank', 'indusind', 'bank',
+      'phonepe', 'google pay', 'gpay', 'paytm', 'upi payment', 'unknown',
+    };
+    const bankTokens = ['icici', 'hdfc bank', 'axis bank', 'state bank', 'sbi', 'kotak bank', 'yes bank', 'idfc bank', 'indusind'];
+    const semantic = ['mutual fund', 'sip', 'gold', 'subscription', 'autopay', 'emi', 'loan', 'insurance', 'refund'];
+    final bankOnly = bankTokens.any(value.contains) && !semantic.any(value.contains);
+    return generic.contains(value) || bankOnly || RegExp(r'^(?:ad|ax|vm|bk|jm|vk|bp)-[a-z0-9-]+$', caseSensitive: false).hasMatch(value);
+  }
+
+  String _ruleText(String value) => value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9@& ]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  List<String> _correctionPatternParts(TxRecord tx) {
+    final raw = _ruleText(tx.rawMessage);
+    final parts = <String>[];
+
+    // Prefer the actual purpose/payee embedded in the message. Bank/sender names
+    // are transport context, not the semantic identity of a transaction.
+    final purposeMatchers = <RegExp>[
+      RegExp(r'\btowards\s+([a-z0-9@.& _-]{2,45}?)(?=\s+(?:for|on|via|ref|retrieval|using|from)\b|$)', caseSensitive: false),
+      RegExp(r'\bpaid\s+to\s+([a-z0-9@.& _-]{2,45}?)(?=\s+(?:on|via|ref|using|from)\b|$)', caseSensitive: false),
+      RegExp(r'\bsent\s+to\s+([a-z0-9@.& _-]{2,45}?)(?=\s+(?:on|via|ref|using|from)\b|$)', caseSensitive: false),
+      RegExp(r'\bto\s+([a-z0-9@.& _-]{2,35}?)(?=\s+(?:via|on|ref|using)\b|$)', caseSensitive: false),
+    ];
+    for (final matcher in purposeMatchers) {
+      final match = matcher.firstMatch(raw);
+      if (match != null) {
+        var value = _ruleText(match.group(1) ?? '');
+        value = value.replaceAll(RegExp(r'\b(?:bank|ltd|limited|pvt|private)\b'), '').replaceAll(RegExp(r'\s+'), ' ').trim();
+        if (value.length >= 3 && !_unsafeBroadRule(value)) {
+          parts.add(value);
+          break;
+        }
+      }
+    }
+
+    const contexts = <String>[
+      'subscription', 'autopay', 'auto pay', 'sip', 'mutual fund', 'gold', 'emi', 'loan',
+      'insurance', 'premium', 'electricity', 'recharge', 'rent', 'credit card', 'google',
+      'netflix', 'spotify', 'zerodha', 'groww', 'zomato', 'swiggy', 'refund', 'reversal',
+    ];
+    for (final context in contexts) {
+      if (raw.contains(context) && !parts.contains(context)) parts.add(context);
+      if (parts.length >= 4) break;
+    }
+
+    if (parts.isEmpty) {
+      final normalized = _ruleText(tx.normalizedMerchant.trim().isNotEmpty ? tx.normalizedMerchant : tx.merchant);
+      if (normalized.length >= 3 && !_unsafeBroadRule(normalized)) parts.add(normalized);
+    }
+    return parts.toSet().take(4).toList();
+  }
+
+  String _correctionPattern(TxRecord tx) => _correctionPatternParts(tx).join('&&');
+
+  bool _matchesPatternText(String rawMessage, String merchant, String normalizedMerchantValue, String pattern) {
+    final parts = pattern.split('&&').map(_ruleText).where((e) => e.isNotEmpty).toList();
+    if (parts.isEmpty) return false;
+    final haystack = _ruleText('$rawMessage $merchant $normalizedMerchantValue');
+    return parts.every(haystack.contains);
+  }
+
+  Future<int> cleanupUnsafeBroadUserRules() async {
+    final db = await database;
+    final rows = await db.query('rules', columns: ['id', 'keyword'], where: 'is_user_rule=1');
+    var removed = 0;
+    for (final row in rows) {
+      final keyword = '${row['keyword'] ?? ''}'.trim();
+      if (_unsafeBroadRule(keyword)) {
+        removed += await db.delete('rules', where: 'id=?', whereArgs: [row['id']]);
+      }
+    }
+    return removed;
+  }
+
   Future<void> updateTransaction(int id, {required String type, required String category, required String merchant, required String note, bool learnRule = true}) async {
     final db = await database;
     final before = await transactionById(id);
@@ -341,33 +424,34 @@ class AppDb {
         'final_category': category, 'action': 'corrected', 'created_at': DateTime.now().millisecondsSinceEpoch,
       });
     }
-    final learn = learnRule && await getBoolSetting('learn_from_corrections', fallback: true);
-    final keyword = normalized.trim().toLowerCase();
-    const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
-    if (learn && keyword.length >= 3 && !generic.contains(keyword)) {
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final existing = await db.query('rules', columns: ['id'], where: 'keyword=? AND is_user_rule=1', whereArgs: [keyword], limit: 1);
-      final values = {'merchant': normalized, 'keyword': keyword, 'type': type, 'category': category, 'is_user_rule': 1, 'enabled': 1, 'created_at': now};
-      if (existing.isEmpty) { await db.insert('rules', values); } else { await db.update('rules', values, where: 'id=?', whereArgs: [existing.first['id']]); }
+
+    final learn = learnRule && before != null && await getBoolSetting('learn_from_corrections', fallback: true);
+    if (learn) {
+      final pattern = _correctionPattern(before);
+      if (pattern.isNotEmpty) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        final existing = await db.query('rules', columns: ['id'], where: 'keyword=? AND is_user_rule=1', whereArgs: [pattern], limit: 1);
+        final values = {'merchant': normalized, 'keyword': pattern, 'type': type, 'category': category, 'is_user_rule': 1, 'enabled': 1, 'created_at': now};
+        if (existing.isEmpty) { await db.insert('rules', values); } else { await db.update('rules', values, where: 'id=?', whereArgs: [existing.first['id']]); }
+      }
     }
   }
 
   Future<int> countSimilarTransactions(TxRecord source) async {
     if (source.id == null) return 0;
+    final pattern = _correctionPattern(source);
+    if (pattern.isEmpty) return 0;
     final db = await database;
-    final normalized = source.normalizedMerchant.trim().isNotEmpty
-        ? source.normalizedMerchant.trim()
-        : await normalizedMerchant(source.merchant);
-    final key = normalized.toLowerCase().trim();
-    const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
-    if (key.length < 3 || generic.contains(key)) return 0;
-    final rows = await db.rawQuery('''
-      SELECT COUNT(*) AS c FROM transactions
-      WHERE review_status IN ('accepted','needs_review') AND id<>?
-        AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?)
-        AND ((type=? AND category=?) OR category='Uncategorized')
-    ''', [source.id, key, key, source.type, source.category]);
-    return Sqflite.firstIntValue(rows) ?? 0;
+    final rows = await db.query(
+      'transactions',
+      columns: ['id', 'raw_message', 'merchant', 'normalized_merchant'],
+      where: "review_status IN ('accepted','needs_review') AND id<>? AND source IN ('sms','phonepe_notification')",
+      whereArgs: [source.id],
+      limit: 5000,
+    );
+    return rows.where((row) => _matchesPatternText(
+      '${row['raw_message'] ?? ''}', '${row['merchant'] ?? ''}', '${row['normalized_merchant'] ?? ''}', pattern,
+    )).length;
   }
 
   Future<int> applyCorrectionToSimilar({
@@ -378,34 +462,40 @@ class AppDb {
   }) async {
     if (source.id == null) return 0;
     final db = await database;
+    final pattern = _correctionPattern(source);
+    if (pattern.isEmpty) return 0;
     final normalized = await normalizedMerchant(merchant);
-    final sourceNormalized = source.normalizedMerchant.trim().isNotEmpty
-        ? source.normalizedMerchant.trim()
-        : await normalizedMerchant(source.merchant);
-    final key = sourceNormalized.toLowerCase().trim();
-    const generic = {'unknown', 'phonepe', 'upi payment', 'manual transaction'};
-    if (key.length < 3 || generic.contains(key)) return 0;
-
-    final changed = await db.update(
+    final rows = await db.query(
       'transactions',
-      {
-        'type': type,
-        'category': category,
-        'merchant': merchant.trim().isEmpty ? normalized : merchant.trim(),
-        'normalized_merchant': normalized,
-        'classification_method': 'user_bulk_rule',
-        'classification_confidence': 1.0,
-        'review_status': 'accepted',
-      },
-      where: "review_status IN ('accepted','needs_review') AND id<>? AND (LOWER(normalized_merchant)=? OR LOWER(merchant)=?) AND ((type=? AND category=?) OR category='Uncategorized')",
-      whereArgs: [source.id, key, key, source.type, source.category],
+      columns: ['id', 'raw_message', 'merchant', 'normalized_merchant'],
+      where: "review_status IN ('accepted','needs_review') AND id<>? AND source IN ('sms','phonepe_notification')",
+      whereArgs: [source.id],
+      limit: 5000,
     );
+    var changed = 0;
+    for (final row in rows) {
+      if (!_matchesPatternText('${row['raw_message'] ?? ''}', '${row['merchant'] ?? ''}', '${row['normalized_merchant'] ?? ''}', pattern)) continue;
+      changed += await db.update(
+        'transactions',
+        {
+          'type': type,
+          'category': category,
+          'merchant': merchant.trim().isEmpty ? '${row['merchant'] ?? ''}' : merchant.trim(),
+          'normalized_merchant': normalized,
+          'classification_method': 'user_pattern_rule',
+          'classification_confidence': 1.0,
+          'review_status': 'accepted',
+        },
+        where: 'id=?',
+        whereArgs: [row['id']],
+      );
+    }
 
     final now = DateTime.now().millisecondsSinceEpoch;
-    final existing = await db.query('rules', columns: ['id'], where: 'keyword=? AND is_user_rule=1', whereArgs: [key], limit: 1);
+    final existing = await db.query('rules', columns: ['id'], where: 'keyword=? AND is_user_rule=1', whereArgs: [pattern], limit: 1);
     final values = {
       'merchant': normalized,
-      'keyword': key,
+      'keyword': pattern,
       'type': type,
       'category': category,
       'is_user_rule': 1,
@@ -992,6 +1082,21 @@ class AppDb {
         final diff=((a['occurred_at'] as int)-(b['occurred_at'] as int)).abs(); if(diff>12*60*60*1000) { if((b['occurred_at'] as int)>(a['occurred_at'] as int)) break; continue; }
         if(((a['amount'] as num).toDouble()-(b['amount'] as num).toDouble()).abs()>0.01) continue;
         if(a['account_hint']==b['account_hint']) continue;
+        // Two unrelated payments can have the same amount on the same day.
+        // Require a shared transaction reference or explicit self-transfer evidence.
+        final refA = (a['upi_reference'] as String? ?? '').trim().toLowerCase();
+        final refB = (b['upi_reference'] as String? ?? '').trim().toLowerCase();
+        if (refA.isNotEmpty && refB.isNotEmpty && refA != refB) continue;
+        final sameRef = refA.isNotEmpty && refA == refB;
+        final messageA = '${a['raw_message'] ?? ''}'.toLowerCase();
+        final messageB = '${b['raw_message'] ?? ''}'.toLowerCase();
+        final explicitSelf = [messageA, messageB].any((message) =>
+          message.contains('self transfer') ||
+          message.contains('own account') ||
+          message.contains('between your accounts') ||
+          message.contains('internal transfer'));
+        if (!sameRef && !explicitSelf) continue;
+        if (diff > (sameRef ? 30 : 5) * 60 * 1000) continue;
         final gid='tr-${math.min(aid,bid)}-${math.max(aid,bid)}';
         await db.update('transactions',{'type':'transfer','category':'Transfer','transfer_group_id':gid,'classification_method':'smart_transfer'},where:'id IN (?,?)',whereArgs:[aid,bid]);
         used.addAll([aid,bid]); matched++; break;
@@ -1005,7 +1110,7 @@ class AppDb {
     final db = await database;
     final rows = await db.query(
       'transactions',
-      where: "review_status='accepted' AND source IN ('sms','phonepe_notification')",
+      where: "review_status='accepted' AND (source='sms' OR source LIKE '%_notification')",
       orderBy: 'occurred_at ASC',
     );
     if (rows.length < 2) return {'ignored': 0, 'kept': rows.length};
@@ -1063,7 +1168,10 @@ class AppDb {
       final diff = (timeValue(a) - timeValue(b)).abs();
       final refA = textValue(a, 'upi_reference');
       final refB = textValue(b, 'upi_reference');
-      if (refA.isNotEmpty && refB.isNotEmpty && refA.toLowerCase() == refB.toLowerCase()) return diff <= 10 * 60 * 1000;
+      if (refA.isNotEmpty && refB.isNotEmpty) {
+        if (refA.toLowerCase() != refB.toLowerCase()) return false;
+        return diff <= 10 * 60 * 1000;
+      }
 
       final accountA = textValue(a, 'account_hint');
       final accountB = textValue(b, 'account_hint');

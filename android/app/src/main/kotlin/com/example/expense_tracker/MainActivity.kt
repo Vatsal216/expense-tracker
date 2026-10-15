@@ -24,6 +24,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingSmsHistoryResult: MethodChannel.Result? = null
     private var pendingNotificationResult: MethodChannel.Result? = null
     private var pendingUpiResult: MethodChannel.Result? = null
+    private var pendingUpiPackage: String? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -71,6 +72,7 @@ class MainActivity : FlutterFragmentActivity() {
                     if (title.isNotBlank() && text.isNotBlank()) NotificationHelper.showBudgetAlert(applicationContext, title, text)
                     result.success(null)
                 }
+                "getUpiApps" -> getUpiApps(call.arguments as? Map<*, *>, result)
                 "startUpiPayment" -> startUpiPayment(call.arguments as? Map<*, *>, result)
                 else -> result.notImplemented()
             }
@@ -211,6 +213,76 @@ class MainActivity : FlutterFragmentActivity() {
         return enabled.contains(packageName)
     }
 
+    private fun validatedUpiUri(paymentUri: String): Uri? {
+        val uri = try { Uri.parse(paymentUri) } catch (_: Exception) { null } ?: return null
+        if (!uri.scheme.equals("upi", ignoreCase = true) || !uri.host.equals("pay", ignoreCase = true)) return null
+        val upiId = uri.getQueryParameter("pa").orEmpty().trim()
+        if (upiId.isBlank() || !upiId.contains("@")) return null
+        return uri
+    }
+
+    private fun upiReadyPackages(uri: Uri? = null): Set<String> {
+        val pm = packageManager
+        val generic = Intent(Intent.ACTION_VIEW, Uri.parse("upi://pay"))
+        val ready = pm.queryIntentActivities(generic, PackageManager.MATCH_DEFAULT_ONLY)
+            .mapNotNull { it.activityInfo?.packageName }
+            .filter { it != packageName }
+            .toMutableSet()
+
+        if (uri != null) {
+            val exact = Intent(Intent.ACTION_VIEW, uri)
+            val exactPackages = pm.queryIntentActivities(exact, PackageManager.MATCH_DEFAULT_ONLY)
+                .mapNotNull { it.activityInfo?.packageName }
+                .toSet()
+            ready.retainAll(exactPackages)
+        }
+        return ready
+    }
+
+    private fun friendlyUpiName(packageName: String, fallback: String): String = when (packageName) {
+        "net.one97.paytm" -> "Paytm"
+        "com.google.android.apps.nbu.paisa.user" -> "Google Pay"
+        "com.phonepe.app" -> "PhonePe"
+        "in.org.npci.upiapp" -> "BHIM"
+        else -> fallback
+    }
+
+    private fun getUpiApps(args: Map<*, *>?, result: MethodChannel.Result) {
+        val paymentUri = args?.get("paymentUri")?.toString()?.trim().orEmpty()
+        val uri = if (paymentUri.isBlank()) null else validatedUpiUri(paymentUri)
+        if (paymentUri.isNotBlank() && uri == null) {
+            result.error("INVALID_UPI", "Invalid UPI payment URI.", null)
+            return
+        }
+
+        val pm = packageManager
+        val packages = upiReadyPackages(uri)
+        val knownOrder = mapOf(
+            "net.one97.paytm" to 0,
+            "com.google.android.apps.nbu.paisa.user" to 1,
+            "com.phonepe.app" to 2,
+            "in.org.npci.upiapp" to 3,
+        )
+
+        val apps = packages.mapNotNull { pkg ->
+            try {
+                val info = pm.getApplicationInfo(pkg, 0)
+                val systemLabel = pm.getApplicationLabel(info).toString().trim().ifBlank { pkg }
+                mapOf(
+                    "packageName" to pkg,
+                    "name" to friendlyUpiName(pkg, systemLabel),
+                    "known" to knownOrder.containsKey(pkg),
+                )
+            } catch (_: Exception) {
+                null
+            }
+        }.sortedWith(
+            compareBy<Map<String, Any>> { knownOrder[it["packageName"] as String] ?: 100 }
+                .thenBy { (it["name"] as String).lowercase() }
+        )
+        result.success(apps)
+    }
+
     private fun startUpiPayment(args: Map<*, *>?, result: MethodChannel.Result) {
         val paymentUri = args?.get("paymentUri")?.toString()?.trim().orEmpty()
         if (paymentUri.isBlank()) {
@@ -218,39 +290,52 @@ class MainActivity : FlutterFragmentActivity() {
             return
         }
 
-        val uri = try { Uri.parse(paymentUri) } catch (_: Exception) { null }
-        if (uri == null || !uri.scheme.equals("upi", ignoreCase = true) || !uri.host.equals("pay", ignoreCase = true)) {
-            result.error("INVALID_UPI", "Invalid UPI payment URI.", null)
+        val uri = validatedUpiUri(paymentUri)
+        if (uri == null) {
+            result.error("INVALID_UPI", "A valid upi://pay URI with payee UPI ID is required.", null)
             return
         }
 
-        val upiId = uri.getQueryParameter("pa").orEmpty().trim()
-        if (upiId.isBlank() || !upiId.contains("@")) {
-            result.error("INVALID_UPI", "A valid payee UPI ID is required.", null)
+        val requestedPackage = args?.get("packageName")?.toString()?.trim().orEmpty()
+        val baseIntent = Intent(Intent.ACTION_VIEW, uri)
+        val readyPackages = upiReadyPackages(uri)
+        if (readyPackages.isEmpty()) {
+            result.error("NO_UPI_APP", "No UPI-ready app is available for this payment on this device.", null)
+            return
+        }
+        if (requestedPackage.isNotBlank() && !readyPackages.contains(requestedPackage)) {
+            result.error("UPI_APP_NOT_READY", "The selected UPI app is not ready to handle this payment.", null)
             return
         }
 
-        val baseIntent = Intent(Intent.ACTION_VIEW, uri).apply {
-            addCategory(Intent.CATEGORY_BROWSABLE)
-        }
         pendingUpiResult = result
+        pendingUpiPackage = requestedPackage.ifBlank { null }
 
         try {
-            if (baseIntent.resolveActivity(packageManager) != null) {
-                // Pass the complete QR/UPI URI through unchanged so the selected UPI app
-                // receives merchant/reference fields such as tr, mc, mode, orgid, etc.
-                startActivityForResult(Intent.createChooser(baseIntent, "Choose UPI app"), upiRequestCode)
+            if (requestedPackage.isNotBlank()) {
+                // Direct smart-intent launch: Paytm / Google Pay / PhonePe / BHIM / any
+                // dynamically discovered UPI app. The complete URI is passed untouched.
+                baseIntent.setPackage(requestedPackage)
+                startActivityForResult(baseIntent, upiRequestCode)
             } else {
-                pendingUpiResult = null
-                result.error("NO_UPI_APP", "No UPI app is available on this device.", null)
+                // NPCI-compatible generic option: always keep "Pay by any UPI app" available.
+                startActivityForResult(Intent.createChooser(baseIntent, "Pay by any UPI app"), upiRequestCode)
             }
         } catch (e: ActivityNotFoundException) {
             pendingUpiResult = null
-            result.error("NO_UPI_APP", "No compatible UPI app was found.", null)
+            pendingUpiPackage = null
+            result.error("NO_UPI_APP", "The selected UPI app could not be opened.", null)
         } catch (e: Exception) {
             pendingUpiResult = null
+            pendingUpiPackage = null
             result.error("UPI_LAUNCH_FAILED", e.message, null)
         }
+    }
+
+    private fun decodeUpiValue(value: String): String = try {
+        Uri.decode(value).trim()
+    } catch (_: Exception) {
+        value.trim()
     }
 
     @Deprecated("Deprecated in Android API but retained for UPI app result compatibility")
@@ -258,31 +343,59 @@ class MainActivity : FlutterFragmentActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != upiRequestCode) return
 
-        val raw = data?.getStringExtra("response")
-            ?: data?.dataString
-            ?: data?.extras?.keySet()?.joinToString("&") { key -> "$key=${data.extras?.get(key)}" }
-            ?: ""
-
-        val parsed = mutableMapOf<String, String>()
-        raw.split("&").forEach { part ->
-            val pair = part.split("=", limit = 2)
-            if (pair.size == 2) parsed[pair[0].trim().lowercase()] = pair[1].trim()
+        val parsed = linkedMapOf<String, String>()
+        data?.extras?.keySet()?.forEach { key ->
+            val value = data.extras?.get(key)?.toString().orEmpty()
+            if (value.isNotBlank()) parsed[key.trim().lowercase()] = decodeUpiValue(value)
         }
 
-        val status = parsed["status"]
-            ?: if (resultCode == Activity.RESULT_CANCELED) "cancelled" else "unknown"
+        val response = data?.getStringExtra("response").orEmpty()
+        if (response.isNotBlank()) {
+            response.split("&").forEach { part ->
+                val pair = part.split("=", limit = 2)
+                if (pair.size == 2) parsed[pair[0].trim().lowercase()] = decodeUpiValue(pair[1])
+            }
+        }
+
+        val dataString = data?.dataString.orEmpty()
+        if (dataString.contains("=")) {
+            val query = dataString.substringAfter('?', dataString)
+            query.split("&").forEach { part ->
+                val pair = part.split("=", limit = 2)
+                if (pair.size == 2) parsed.putIfAbsent(pair[0].trim().lowercase(), decodeUpiValue(pair[1]))
+            }
+        }
+
+        val raw = when {
+            response.isNotBlank() -> response
+            parsed.isNotEmpty() -> parsed.entries.joinToString("&") { "${it.key}=${it.value}" }
+            dataString.isNotBlank() -> dataString
+            else -> ""
+        }
+
+        val rawStatus = parsed["status"].orEmpty()
+        val responseCode = parsed["responsecode"] ?: parsed["response_code"] ?: ""
+        val status = when {
+            rawStatus.equals("success", true) || responseCode == "00" -> "success"
+            rawStatus.equals("submitted", true) || rawStatus.equals("pending", true) -> "pending"
+            rawStatus.equals("failure", true) || rawStatus.equals("failed", true) -> "failed"
+            resultCode == Activity.RESULT_CANCELED -> "cancelled"
+            else -> rawStatus.ifBlank { "unknown" }.lowercase()
+        }
 
         pendingUpiResult?.success(
             mapOf(
                 "status" to status,
                 "txnId" to (parsed["txnid"] ?: parsed["txn_id"] ?: ""),
-                "txnRef" to (parsed["txnref"] ?: parsed["txn_ref"] ?: ""),
+                "txnRef" to (parsed["txnref"] ?: parsed["txn_ref"] ?: parsed["tr"] ?: ""),
                 "approvalRefNo" to (parsed["approvalrefno"] ?: parsed["approval_ref_no"] ?: ""),
-                "responseCode" to (parsed["responsecode"] ?: parsed["response_code"] ?: ""),
+                "responseCode" to responseCode,
+                "appPackage" to (pendingUpiPackage ?: ""),
                 "raw" to raw,
             )
         )
         pendingUpiResult = null
+        pendingUpiPackage = null
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

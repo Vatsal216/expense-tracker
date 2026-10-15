@@ -23,6 +23,30 @@ void main() {
 Future<void> _initializeServices() async {
   try {
     await AppDb.instance.initialize();
+    // v24: promotional/discount SMS such as "Rs 3000 OFF" must not remain
+    // in the ledger after the classifier safety upgrade. Preserve manual/user
+    // corrections because the native reclassifier explicitly excludes them.
+    final promoCleanupDone = await AppDb.instance.getBoolSetting('classifier_promo_guard_v24_done', fallback: false);
+    if (!promoCleanupDone) {
+      try {
+        await NativeBridge.reclassifyStoredSms();
+        await AppDb.instance.setSetting('classifier_promo_guard_v24_done', '1');
+        expenseDataRevision.value++;
+      } catch (e) {
+        debugPrint('v24 promotional SMS cleanup skipped: $e');
+      }
+    }
+    final removedUnsafeRules = await AppDb.instance.cleanupUnsafeBroadUserRules();
+    final patternCleanupDone = await AppDb.instance.getBoolSetting('classifier_pattern_cleanup_v22_done', fallback: false);
+    if (!patternCleanupDone || removedUnsafeRules > 0) {
+      try {
+        await NativeBridge.reclassifyStoredSms();
+        await AppDb.instance.setSetting('classifier_pattern_cleanup_v22_done', '1');
+        expenseDataRevision.value++;
+      } catch (e) {
+        debugPrint('v22 pattern cleanup skipped: $e');
+      }
+    }
     final cleanupDone = await AppDb.instance.getBoolSetting('classifier_cleanup_v15_done', fallback: false);
     if (!cleanupDone) {
       try {
@@ -35,15 +59,24 @@ Future<void> _initializeServices() async {
     final enabled = await AppDb.instance.getBoolSetting('daily_summary_enabled', fallback: true);
     final hour = int.tryParse(await AppDb.instance.getSetting('daily_summary_hour', fallback: '21')) ?? 21;
     final minute = int.tryParse(await AppDb.instance.getSetting('daily_summary_minute', fallback: '0')) ?? 0;
-    await NativeBridge.scheduleDailySummary(enabled: enabled, hour: hour, minute: minute);
-    await loadEnhancedPreferences();
-    await AppDb.instance.normalizeExistingMerchants();
-    await AppDb.instance.syncAccountsFromTransactions();
-    await AppDb.instance.matchTransfers();
-    final dedupResult = await AppDb.instance.smartDeduplicate();
-    if ((dedupResult['ignored'] ?? 0) > 0) expenseDataRevision.value++;
-    await runDailySmartAlerts();
-    try { await NativeBridge.updateHomeWidget(); } catch (_) {}
+    Future<void> safeTask(String label, Future<void> Function() task) async {
+      try {
+        await task();
+      } catch (e) {
+        debugPrint('Startup task $label failed: $e');
+      }
+    }
+    await safeTask('daily summary', () => NativeBridge.scheduleDailySummary(enabled: enabled, hour: hour, minute: minute));
+    await safeTask('preferences', () => loadEnhancedPreferences());
+    await safeTask('merchant normalization', () => AppDb.instance.normalizeExistingMerchants());
+    await safeTask('account sync', () => AppDb.instance.syncAccountsFromTransactions());
+    await safeTask('transfer matching', () async { await AppDb.instance.matchTransfers(); });
+    await safeTask('deduplication', () async {
+      final dedupResult = await AppDb.instance.smartDeduplicate();
+      if ((dedupResult['ignored'] ?? 0) > 0) expenseDataRevision.value++;
+    });
+    await safeTask('smart alerts', () => runDailySmartAlerts());
+    await safeTask('home widget', () => NativeBridge.updateHomeWidget());
   } catch (e, stack) {
     debugPrint('Startup initialization failed: $e');
     debugPrintStack(stackTrace: stack);
@@ -147,9 +180,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final pages = <Widget>[
-      HomePage(key: ValueKey('home-$refreshToken'), onChanged: refresh, onNavigate: navigateTo),
+      HomePage(onChanged: refresh, onNavigate: navigateTo),
       TransactionsPage(key: ValueKey('tx-$refreshToken'), onChanged: refresh),
       PayUpiPage(key: ValueKey('pay-$refreshToken'), onChanged: refresh),
+      PlanPage(key: ValueKey('plan-$refreshToken')),
       ReportsPage(key: ValueKey('report-$refreshToken')),
       SettingsPage(key: ValueKey('settings-$refreshToken'), onChanged: refresh),
     ];
@@ -166,10 +200,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           child: NavigationBar(
             selectedIndex: index,
             onDestinationSelected: navigateTo,
+            labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
             destinations: const [
               NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Home'),
               NavigationDestination(icon: Icon(Icons.receipt_long_rounded), label: 'Activity'),
               NavigationDestination(icon: Icon(Icons.qr_code_2_rounded), label: 'Pay'),
+              NavigationDestination(icon: Icon(Icons.savings_outlined), selectedIcon: Icon(Icons.savings_rounded), label: 'Plan'),
               NavigationDestination(icon: Icon(Icons.insights_rounded), label: 'Reports'),
               NavigationDestination(icon: Icon(Icons.settings_rounded), label: 'Settings'),
             ],
@@ -178,6 +214,32 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       ),
     );
   }
+}
+
+class PlanPage extends StatelessWidget {
+  const PlanPage({super.key});
+
+  @override
+  Widget build(BuildContext context) => DefaultTabController(
+        length: 2,
+        child: Scaffold(
+          appBar: AppBar(
+            title: const Text('Plan'),
+            bottom: const TabBar(
+              tabs: [
+                Tab(icon: Icon(Icons.chat_bubble_outline_rounded), text: 'Money planner'),
+                Tab(icon: Icon(Icons.repeat_rounded), text: 'Recurring'),
+              ],
+            ),
+          ),
+          body: const TabBarView(
+            children: [
+              FinancialAssistantPage(embedded: true),
+              RecurringPaymentsPage(embedded: true),
+            ],
+          ),
+        ),
+      );
 }
 
 class HomePage extends StatefulWidget {
@@ -190,8 +252,35 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  String period = 'month';
+  String period = 'week';
   DateTimeRange? customRange;
+
+  @override
+  void initState() {
+    super.initState();
+    _restorePeriod();
+  }
+
+  Future<void> _restorePeriod() async {
+    final saved = await AppDb.instance.getSetting('home_period_filter', fallback: 'week');
+    final valid = {'total', 'month', 'week', 'day', 'custom'}.contains(saved) ? saved : 'week';
+    DateTimeRange? restored;
+    if (valid == 'custom') {
+      final start = int.tryParse(await AppDb.instance.getSetting('home_custom_start'));
+      final end = int.tryParse(await AppDb.instance.getSetting('home_custom_end'));
+      if (start != null && end != null && end >= start) {
+        restored = DateTimeRange(
+          start: DateTime.fromMillisecondsSinceEpoch(start),
+          end: DateTime.fromMillisecondsSinceEpoch(end),
+        );
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      period = valid == 'custom' && restored == null ? 'week' : valid;
+      customRange = restored;
+    });
+  }
 
   (int, int) _range() {
     final now = DateTime.now();
@@ -236,6 +325,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _selectPeriod(String value) async {
     if (value != 'custom') {
       setState(() => period = value);
+      await AppDb.instance.setSetting('home_period_filter', value);
       return;
     }
     final now = DateTime.now();
@@ -246,7 +336,12 @@ class _HomePageState extends State<HomePage> {
       initialDateRange: customRange ?? DateTimeRange(start: DateTime(now.year, now.month, 1), end: now),
       helpText: 'Select dashboard date range',
     );
-    if (picked != null && mounted) setState(() { customRange = picked; period = 'custom'; });
+    if (picked != null && mounted) {
+      setState(() { customRange = picked; period = 'custom'; });
+      await AppDb.instance.setSetting('home_period_filter', 'custom');
+      await AppDb.instance.setSetting('home_custom_start', picked.start.millisecondsSinceEpoch.toString());
+      await AppDb.instance.setSetting('home_custom_end', picked.end.millisecondsSinceEpoch.toString());
+    }
   }
 
   Future<List<dynamic>> load() async {
@@ -256,7 +351,6 @@ class _HomePageState extends State<HomePage> {
       AppDb.instance.overallBudget(),
       AppDb.instance.searchTransactions(startMs: range.$1, endMs: range.$2, limit: 6),
       AppDb.instance.reviewTransactions(),
-      AppDb.instance.safeToSpendSnapshot(),
     ]);
   }
 
@@ -272,7 +366,6 @@ class _HomePageState extends State<HomePage> {
         final budget = snap.data![1] as double;
         final recent = snap.data![2] as List<TxRecord>;
         final review = snap.data![3] as List<TxRecord>;
-        final safe = snap.data![4] as Map<String, Object?>;
         final spent = totals['expense'] ?? 0;
         final invested = totals['investment'] ?? 0;
         final income = totals['income'] ?? 0;
@@ -313,18 +406,16 @@ class _HomePageState extends State<HomePage> {
                 child: ListView(
                   scrollDirection: Axis.horizontal,
                   children: [
-                    _periodChip('total', 'Total', Icons.all_inclusive_rounded),
-                    _periodChip('month', 'Month', Icons.calendar_month_rounded),
                     _periodChip('week', 'Week', Icons.date_range_rounded),
+                    _periodChip('month', 'Month', Icons.calendar_month_rounded),
                     _periodChip('day', 'Day', Icons.today_rounded),
+                    _periodChip('total', 'Total', Icons.all_inclusive_rounded),
                     _periodChip('custom', 'Custom', Icons.tune_rounded),
                   ],
                 ),
               ),
               const SizedBox(height: 16),
               _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress),
-              const SizedBox(height: 16),
-              _SafeToSpendCard(snapshot: safe),
               const SizedBox(height: 22),
               SectionHeader(
                 title: 'Money Map',
@@ -334,7 +425,7 @@ class _HomePageState extends State<HomePage> {
                   context,
                   MaterialPageRoute(
                     builder: (_) => MoneyMapPage(
-                      initialPeriod: ['month', 'week', 'custom'].contains(period) ? period : 'month',
+                      initialPeriod: period,
                       initialCustomRange: period == 'custom' ? customRange : null,
                     ),
                   ),
@@ -346,15 +437,6 @@ class _HomePageState extends State<HomePage> {
                 endMs: selectedRange.$2,
                 periodLabel: _periodSubtitle,
               ),
-              const SizedBox(height: 22),
-              SectionHeader(
-                title: 'AI Financial Coach',
-                subtitle: 'Local pattern analysis, forecasts and saving opportunities',
-                actionLabel: 'See analysis',
-                onAction: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FinancialCoachPage())),
-              ),
-              const SizedBox(height: 12),
-              const _FinancialCoachAsyncPreview(),
               const SizedBox(height: 22),
               SectionHeader(
                 title: 'Financial inbox',
@@ -379,15 +461,6 @@ class _HomePageState extends State<HomePage> {
                   Expanded(child: QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Budget', caption: 'Set limits', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); widget.onChanged(); })),
                 ],
               ),
-              const SizedBox(height: 22),
-              SectionHeader(
-                title: 'Recurring payments',
-                subtitle: 'Only payments you choose are tracked here',
-                actionLabel: 'Manage',
-                onAction: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RecurringPaymentsPage())),
-              ),
-              const SizedBox(height: 12),
-              const _HomeRecurringPreview(),
               const SizedBox(height: 24),
               SectionHeader(
                 title: 'Recent activity',
@@ -959,17 +1032,17 @@ class _MoneyMapAsyncPreview extends StatelessWidget {
       );
 }
 
-class _FinancialCoachAsyncPreview extends StatelessWidget {
-  const _FinancialCoachAsyncPreview();
+class _FinancialAssistantAsyncPreview extends StatelessWidget {
+  const _FinancialAssistantAsyncPreview();
 
   @override
-  Widget build(BuildContext context) => FutureBuilder<FinancialCoachSnapshot>(
-        future: FinancialAiEngine.instance.coachSnapshot(),
+  Widget build(BuildContext context) => FutureBuilder<FinancialAssistantSnapshot>(
+        future: FinancialAiEngine.instance.assistantSnapshot(),
         builder: (context, snap) {
-          if (snap.hasError) return const EmptyCard(text: 'Financial Coach is temporarily unavailable.');
+          if (snap.hasError) return const EmptyCard(text: 'Financial Assistant is temporarily unavailable.');
           if (!snap.hasData) {
             return Container(
-              height: 110,
+              height: 104,
               decoration: BoxDecoration(
                 color: Theme.of(context).cardColor,
                 borderRadius: BorderRadius.circular(24),
@@ -978,7 +1051,7 @@ class _FinancialCoachAsyncPreview extends StatelessWidget {
               child: const Center(child: CircularProgressIndicator()),
             );
           }
-          return _FinancialCoachPreview(snapshot: snap.data!);
+          return _FinancialAssistantPreview(snapshot: snap.data!);
         },
       );
 }
@@ -1156,61 +1229,106 @@ class _MoneyMapMiniRow extends StatelessWidget {
   }
 }
 
-class _FinancialCoachPreview extends StatelessWidget {
-  final FinancialCoachSnapshot snapshot;
-  const _FinancialCoachPreview({required this.snapshot});
-
-  IconData _icon(String kind) => switch (kind) {
-        'forecast' => Icons.query_stats_rounded,
-        'saving' => Icons.savings_outlined,
-        'investment' => Icons.donut_large_rounded,
-        _ => Icons.auto_awesome_rounded,
-      };
+class _FinancialAssistantPreview extends StatelessWidget {
+  final FinancialAssistantSnapshot snapshot;
+  const _FinancialAssistantPreview({required this.snapshot});
 
   @override
   Widget build(BuildContext context) {
-    final items = snapshot.insights.take(3).toList();
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Theme.of(context).cardColor,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Theme.of(context).dividerColor),
-      ),
-      child: items.isEmpty
-          ? const Text('More transaction history is needed before useful behavior and forecast insights can be generated.')
-          : Column(
-              children: items.asMap().entries.map((entry) {
-                final item = entry.value;
-                return Padding(
-                  padding: EdgeInsets.only(bottom: entry.key == items.length - 1 ? 0 : 14),
-                  child: Row(
+    final hasSaving = snapshot.potentialSaving >= 250;
+    final hasCommitments = snapshot.upcomingCommitments > 0;
+    final forecastText = snapshot.forecastLikely > 0
+        ? '${money.format(snapshot.forecastLow)} – ${money.format(snapshot.forecastHigh)}'
+        : 'Building history';
+    return InkWell(
+      onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FinancialAssistantPage())),
+      borderRadius: BorderRadius.circular(24),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).cardColor,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: Theme.of(context).dividerColor),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, borderRadius: BorderRadius.circular(13)),
+                  child: const Icon(Icons.chat_bubble_outline_rounded, size: 21),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(
-                        width: 38,
-                        height: 38,
-                        decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, borderRadius: BorderRadius.circular(12)),
-                        child: Icon(_icon(item.kind), size: 20),
+                      Text(
+                        hasSaving
+                            ? 'Potential saving: ${money.format(snapshot.potentialSaving)} / month'
+                            : hasCommitments
+                                ? 'Upcoming commitments: ${money.format(snapshot.upcomingCommitments)}'
+                                : 'Ask about your money',
+                        style: const TextStyle(fontWeight: FontWeight.w900),
                       ),
-                      const SizedBox(width: 11),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(item.title, style: const TextStyle(fontWeight: FontWeight.w900)),
-                            const SizedBox(height: 3),
-                            Text(item.body, style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4)),
-                          ],
-                        ),
+                      const SizedBox(height: 3),
+                      Text(
+                        hasSaving
+                            ? 'Open a category-by-category action plan instead of another report.'
+                            : hasCommitments
+                                ? 'These are only recurring payments you explicitly confirmed.'
+                                : 'Ask why spending changed, where to save, or what your month may finish at.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.35),
                       ),
                     ],
                   ),
-                );
-              }).toList(),
+                ),
+                const Icon(Icons.chevron_right_rounded),
+              ],
             ),
+            const SizedBox(height: 13),
+            Row(
+              children: [
+                Expanded(child: _AssistantMiniMetric(label: 'Forecast range', value: forecastText)),
+                const SizedBox(width: 10),
+                Expanded(child: _AssistantMiniMetric(label: 'Confirmed commitments', value: money.format(snapshot.upcomingCommitments))),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
+}
+
+class _AssistantMiniMetric extends StatelessWidget {
+  final String label;
+  final String value;
+  const _AssistantMiniMetric({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(11),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: .42),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: Theme.of(context).textTheme.labelSmall?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 3),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(value, style: const TextStyle(fontWeight: FontWeight.w900)),
+            ),
+          ],
+        ),
+      );
 }
 
 class MoneyMapPage extends StatefulWidget {
@@ -1229,16 +1347,22 @@ class _MoneyMapPageState extends State<MoneyMapPage> {
   @override
   void initState() {
     super.initState();
-    period = ['month', 'week', 'custom'].contains(widget.initialPeriod) ? widget.initialPeriod : 'month';
+    period = ['total', 'month', 'week', 'day', 'custom'].contains(widget.initialPeriod) ? widget.initialPeriod : 'week';
     customRange = widget.initialCustomRange;
   }
 
   (int, int) _range() {
     final now = DateTime.now();
     final todayEnd = DateTime(now.year, now.month, now.day + 1).millisecondsSinceEpoch;
+    if (period == 'day') {
+      return (DateTime(now.year, now.month, now.day).millisecondsSinceEpoch, todayEnd);
+    }
     if (period == 'week') {
       final start = DateTime(now.year, now.month, now.day).subtract(Duration(days: now.weekday - 1));
       return (start.millisecondsSinceEpoch, todayEnd);
+    }
+    if (period == 'total') {
+      return (0, todayEnd);
     }
     if (period == 'custom' && customRange != null) {
       final s = customRange!.start;
@@ -1252,7 +1376,9 @@ class _MoneyMapPageState extends State<MoneyMapPage> {
   }
 
   String get _label {
+    if (period == 'day') return 'Today';
     if (period == 'week') return 'This week';
+    if (period == 'total') return 'All recorded transactions';
     if (period == 'custom' && customRange != null) {
       return '${DateFormat('dd MMM').format(customRange!.start)} – ${DateFormat('dd MMM yyyy').format(customRange!.end)}';
     }
@@ -1272,7 +1398,12 @@ class _MoneyMapPageState extends State<MoneyMapPage> {
       initialDateRange: customRange ?? DateTimeRange(start: DateTime(now.year, now.month, 1), end: now),
       helpText: 'Select Money Map range',
     );
-    if (picked != null && mounted) setState(() { customRange = picked; period = 'custom'; });
+    if (picked != null && mounted) {
+      setState(() { customRange = picked; period = 'custom'; });
+      await AppDb.instance.setSetting('home_period_filter', 'custom');
+      await AppDb.instance.setSetting('home_custom_start', picked.start.millisecondsSinceEpoch.toString());
+      await AppDb.instance.setSetting('home_custom_end', picked.end.millisecondsSinceEpoch.toString());
+    }
   }
 
   @override
@@ -1293,8 +1424,10 @@ class _MoneyMapPageState extends State<MoneyMapPage> {
               Wrap(
                 spacing: 8,
                 children: [
-                  ChoiceChip(label: const Text('Month'), selected: period == 'month', onSelected: (_) => _select('month')),
                   ChoiceChip(label: const Text('Week'), selected: period == 'week', onSelected: (_) => _select('week')),
+                  ChoiceChip(label: const Text('Month'), selected: period == 'month', onSelected: (_) => _select('month')),
+                  ChoiceChip(label: const Text('Day'), selected: period == 'day', onSelected: (_) => _select('day')),
+                  ChoiceChip(label: const Text('Total'), selected: period == 'total', onSelected: (_) => _select('total')),
                   ChoiceChip(label: const Text('Custom'), selected: period == 'custom', onSelected: (_) => _select('custom')),
                 ],
               ),
@@ -1514,124 +1647,346 @@ class _MoneyMapDetailRow extends StatelessWidget {
   }
 }
 
-class FinancialCoachPage extends StatelessWidget {
-  const FinancialCoachPage({super.key});
-
-  IconData _icon(String kind) => switch (kind) {
-        'forecast' => Icons.query_stats_rounded,
-        'saving' => Icons.savings_outlined,
-        'investment' => Icons.donut_large_rounded,
-        _ => Icons.auto_awesome_rounded,
-      };
+class FinancialAssistantPage extends StatefulWidget {
+  final bool embedded;
+  const FinancialAssistantPage({super.key, this.embedded = false});
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('AI Financial Coach')),
-        body: FutureBuilder<FinancialCoachSnapshot>(
-          future: FinancialAiEngine.instance.coachSnapshot(),
-          builder: (context, snap) {
-            if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-            final data = snap.data!;
-            return ListView(
-              padding: const EdgeInsets.fromLTRB(18, 8, 18, 32),
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).cardColor,
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: Theme.of(context).dividerColor),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('This month', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-                      const SizedBox(height: 14),
-                      _CoachMetric(label: 'Spent so far', value: money.format(data.currentExpense)),
-                      _CoachMetric(label: 'Projected month-end', value: data.projectedExpense > 0 ? money.format(data.projectedExpense) : 'Not enough data'),
-                      _CoachMetric(label: 'Recent monthly average', value: data.normalMonthlyExpense > 0 ? money.format(data.normalMonthlyExpense) : 'Building history'),
-                      _CoachMetric(label: 'Potential saving found', value: data.potentialSaving > 0 ? money.format(data.potentialSaving) : 'No clear excess yet'),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 22),
-                const SectionHeader(title: 'Coach insights', subtitle: 'Patterns calculated locally from your cleaned transaction history'),
-                const SizedBox(height: 10),
-                if (data.insights.isEmpty)
-                  const EmptyCard(text: 'More history is needed before useful insights can be generated.')
-                else
-                  ...data.insights.map((item) => Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).cardColor,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Theme.of(context).dividerColor),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              width: 42,
-                              height: 42,
-                              decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, borderRadius: BorderRadius.circular(13)),
-                              child: Icon(_icon(item.kind), size: 21),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(item.title, style: const TextStyle(fontWeight: FontWeight.w900)),
-                                  const SizedBox(height: 4),
-                                  Text(item.body, style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45)),
-                                  if (item.value != null) ...[
-                                    const SizedBox(height: 8),
-                                    Text(money.format(item.value), style: TextStyle(fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.primary)),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      )),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: .45),
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                  child: const Text(
-                    'The coach runs on-device using your structured transaction history. Forecasts and saving estimates are approximations, and investment concentration is descriptive rather than investment advice.',
-                    style: TextStyle(height: 1.45),
-                  ),
-                ),
-              ],
-            );
-          },
-        ),
-      );
+  State<FinancialAssistantPage> createState() => _FinancialAssistantPageState();
 }
 
-class _CoachMetric extends StatelessWidget {
-  final String label;
-  final String value;
-  const _CoachMetric({required this.label, required this.value});
+class _FinancialAssistantPageState extends State<FinancialAssistantPage> {
+  final question = TextEditingController();
+  final goalAmount = TextEditingController();
+  bool asking = false;
+  bool planning = false;
+  AssistantAnswer? answer;
+  SavingsGoalPlan? goal;
+  DateTime? goalDeadline;
+
+  static const suggestions = [
+    'Where can I save ₹5,000?',
+    'Why did I spend more this month?',
+    'Compare this month with last month',
+    'What recurring payments are coming?',
+    'Where am I investing most?',
+    'Forecast this month',
+  ];
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 7),
-        child: Row(
+  void initState() {
+    super.initState();
+    _loadSavedGoal();
+  }
+
+  Future<void> _loadSavedGoal() async {
+    final amount = double.tryParse(await AppDb.instance.getSetting('savings_goal_amount', fallback: ''));
+    final deadlineMs = int.tryParse(await AppDb.instance.getSetting('savings_goal_deadline', fallback: ''));
+    if (amount != null && amount > 0 && deadlineMs != null && deadlineMs > DateTime.now().millisecondsSinceEpoch) {
+      goalAmount.text = amount.toStringAsFixed(0);
+      goalDeadline = DateTime.fromMillisecondsSinceEpoch(deadlineMs);
+      final plan = await FinancialAiEngine.instance.goalPlan(targetAmount: amount, deadline: goalDeadline!);
+      if (mounted) setState(() => goal = plan);
+    }
+  }
+
+  Future<void> _ask([String? preset]) async {
+    final text = (preset ?? question.text).trim();
+    if (text.isEmpty || asking) return;
+    question.text = text;
+    FocusScope.of(context).unfocus();
+    setState(() => asking = true);
+    try {
+      final result = await FinancialAiEngine.instance.answerQuestion(text);
+      if (mounted) setState(() => answer = result);
+    } finally {
+      if (mounted) setState(() => asking = false);
+    }
+  }
+
+  Future<void> _pickDeadline() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      firstDate: DateTime(now.year, now.month + 1, 1),
+      lastDate: DateTime(now.year + 10, 12, 31),
+      initialDate: goalDeadline ?? DateTime(now.year, now.month + 6, now.day),
+      helpText: 'Savings goal deadline',
+    );
+    if (picked != null && mounted) setState(() => goalDeadline = picked);
+  }
+
+  Future<void> _planGoal() async {
+    final value = double.tryParse(goalAmount.text.replaceAll(',', '').trim());
+    if (value == null || value <= 0 || goalDeadline == null || planning) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a target amount and choose a deadline.')));
+      return;
+    }
+    setState(() => planning = true);
+    try {
+      final plan = await FinancialAiEngine.instance.goalPlan(targetAmount: value, deadline: goalDeadline!);
+      await AppDb.instance.setSetting('savings_goal_amount', value.toString());
+      await AppDb.instance.setSetting('savings_goal_deadline', goalDeadline!.millisecondsSinceEpoch.toString());
+      if (mounted) setState(() => goal = plan);
+    } finally {
+      if (mounted) setState(() => planning = false);
+    }
+  }
+
+  void _openAnswerTransactions() {
+    final a = answer;
+    if (a == null || !a.hasTransactionDrilldown) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FilteredTransactionsPage(
+          title: a.transactionLabel,
+          startMs: a.startMs,
+          endMs: a.endMs,
+          type: a.type,
+          category: a.category,
+          merchant: a.merchant,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    question.dispose();
+    goalAmount.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final content = ListView(
+          padding: const EdgeInsets.fromLTRB(18, 8, 18, 34),
           children: [
-            Expanded(child: Text(label, style: Theme.of(context).textTheme.bodyMedium)),
-            const SizedBox(width: 12),
-            Flexible(child: FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight, child: Text(value, style: const TextStyle(fontWeight: FontWeight.w900)))),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Theme.of(context).dividerColor),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Plan with your transaction data', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 5),
+                  Text(
+                    'This is local financial analysis, not a general AI chatbot. Ask practical questions and get answers grounded in your cleaned transactions.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4),
+                  ),
+                  const SizedBox(height: 14),
+                  TextField(
+                    controller: question,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _ask(),
+                    decoration: InputDecoration(
+                      hintText: 'e.g. Where can I save ₹5,000 next month?',
+                      prefixIcon: const Icon(Icons.auto_awesome_rounded),
+                      suffixIcon: IconButton(onPressed: asking ? null : _ask, icon: const Icon(Icons.arrow_upward_rounded)),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: suggestions.map((item) => ActionChip(label: Text(item), onPressed: asking ? null : () => _ask(item))).toList(),
+                  ),
+                ],
+              ),
+            ),
+            if (asking) ...[
+              const SizedBox(height: 18),
+              const LinearProgressIndicator(),
+            ],
+            if (answer != null) ...[
+              const SizedBox(height: 20),
+              _AssistantAnswerCard(answer: answer!, onShowTransactions: answer!.hasTransactionDrilldown ? _openAnswerTransactions : null),
+            ],
+            const SizedBox(height: 24),
+            const SectionHeader(title: 'Savings goal', subtitle: 'Set a target and get the monthly gap plus a realistic action plan'),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Theme.of(context).cardColor,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: Theme.of(context).dividerColor),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: goalAmount,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(labelText: 'Target amount', prefixText: '₹ '),
+                  ),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: _pickDeadline,
+                    icon: const Icon(Icons.event_rounded),
+                    label: Text(goalDeadline == null ? 'Choose deadline' : DateFormat('dd MMM yyyy').format(goalDeadline!)),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: planning ? null : _planGoal,
+                      icon: const Icon(Icons.flag_rounded),
+                      label: Text(planning ? 'Calculating…' : 'Build my plan'),
+                    ),
+                  ),
+                  if (goal != null) ...[
+                    const SizedBox(height: 18),
+                    _GoalPlanView(plan: goal!),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest.withValues(alpha: .45),
+                borderRadius: BorderRadius.circular(18),
+              ),
+              child: const Text(
+                'This planner runs locally from structured transaction data. It does not send SMS text to a server. Savings suggestions avoid fixed costs and investments by default, and investment observations are descriptive rather than buy/sell advice.',
+                style: TextStyle(height: 1.45),
+              ),
+            ),
+          ],
+        );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: const Text('Money planner')),
+      body: content,
+    );
+  }
+}
+
+class _AssistantAnswerCard extends StatelessWidget {
+  final AssistantAnswer answer;
+  final VoidCallback? onShowTransactions;
+  const _AssistantAnswerCard({required this.answer, this.onShowTransactions});
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(17),
+        decoration: BoxDecoration(
+          color: Theme.of(context).cardColor,
+          borderRadius: BorderRadius.circular(22),
+          border: Border.all(color: Theme.of(context).dividerColor),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, borderRadius: BorderRadius.circular(13)),
+                  child: const Icon(Icons.auto_awesome_rounded, size: 21),
+                ),
+                const SizedBox(width: 11),
+                Expanded(child: Text(answer.title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900))),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(answer.answer, style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.5)),
+            if (answer.amount != null) ...[
+              const SizedBox(height: 10),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(moneyExact.format(answer.amount), style: TextStyle(fontSize: 21, fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.primary)),
+              ),
+            ],
+            if (answer.points.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              ...answer.points.map((point) => Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Padding(padding: EdgeInsets.only(top: 7), child: Icon(Icons.circle, size: 6)),
+                        const SizedBox(width: 9),
+                        Expanded(child: Text(point, style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.45))),
+                      ],
+                    ),
+                  )),
+            ],
+            if (onShowTransactions != null) ...[
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                onPressed: onShowTransactions,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: Text(answer.transactionLabel),
+              ),
+            ],
           ],
         ),
       );
 }
 
+class _GoalPlanView extends StatelessWidget {
+  final SavingsGoalPlan plan;
+  const _GoalPlanView({required this.plan});
+
+  @override
+  Widget build(BuildContext context) {
+    final covered = plan.actions.fold<double>(0, (a, b) => a + b.savingAmount);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          plan.looksAchievable ? 'Your recorded cash flow can support this target' : 'Monthly gap to close',
+          style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
+        ),
+        const SizedBox(height: 10),
+        _GoalMetric(label: 'Required per month', value: money.format(plan.requiredMonthly)),
+        _GoalMetric(label: 'Recent recorded capacity', value: plan.recentMonthlyCapacity > 0 ? money.format(plan.recentMonthlyCapacity) : 'Not enough income data'),
+        if (plan.monthlyGap > 0) _GoalMetric(label: 'Gap', value: money.format(plan.monthlyGap)),
+        const SizedBox(height: 10),
+        if (plan.monthlyGap > 0 && plan.actions.isEmpty)
+          const Text('I could not find enough discretionary history to build a safe cut plan. Correcting Uncategorized transactions will make this more useful.')
+        else if (plan.actions.isNotEmpty) ...[
+          Text('Suggested monthly changes · about ${money.format(covered)}', style: const TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 8),
+          ...plan.actions.map((a) => Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('• ${a.title}: aim for ${money.format(a.targetAmount)} instead of ~${money.format(a.currentAmount)} (save ~${money.format(a.savingAmount)})'),
+              )),
+        ],
+      ],
+    );
+  }
+}
+
+class _GoalMetric extends StatelessWidget {
+  final String label;
+  final String value;
+  const _GoalMetric({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 7),
+        child: Row(
+          children: [
+            Expanded(child: Text(label, style: Theme.of(context).textTheme.bodySmall)),
+            const SizedBox(width: 10),
+            Flexible(child: FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight, child: Text(value, style: const TextStyle(fontWeight: FontWeight.w900)))),
+          ],
+        ),
+      );
+}
 
 class TransactionsPage extends StatefulWidget {
   final VoidCallback onChanged;
@@ -1999,7 +2354,7 @@ class _TransactionDetailsPageState extends State<TransactionDetailsPage> {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'If this is wrong, tap Edit transaction. You can apply the correction only here or to all similar transactions and future messages.',
+                  'If this is wrong, tap Edit transaction. You can apply the correction only here or to the same message pattern and future matching messages.',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4),
                 ),
               ],
@@ -2170,6 +2525,9 @@ class _PayUpiPageState extends State<PayUpiPage> {
   bool scannedQr = false;
   String? scannedRawQr;
   bool scannedQrHasFixedAmount = false;
+  double? scannedMinimumAmount;
+  bool scannedQrSigned = false;
+  bool scannedQrMerchant = false;
 
   @override
   void dispose() {
@@ -2196,7 +2554,10 @@ class _PayUpiPageState extends State<PayUpiPage> {
       if (result.note.isNotEmpty) note.text = result.note;
       scannedQr = true;
       scannedRawQr = result.raw;
-      scannedQrHasFixedAmount = result.hasAmount;
+      scannedQrHasFixedAmount = result.hasAmount && !result.hasMinimumAmount;
+      scannedMinimumAmount = result.minimumAmount;
+      scannedQrSigned = result.hasSignedPayload;
+      scannedQrMerchant = result.isMerchant;
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -2204,30 +2565,34 @@ class _PayUpiPageState extends State<PayUpiPage> {
     );
   }
 
-  String _buildUpiUri(double value) {
+  String _buildUpiUri(double? value) {
     final raw = scannedRawQr?.trim();
     if (raw != null && raw.isNotEmpty) {
       final original = Uri.tryParse(raw);
       if (original != null && original.scheme.toLowerCase() == 'upi' && original.host.toLowerCase() == 'pay') {
+        final hasSignature = (original.queryParameters['sign'] ?? '').trim().isNotEmpty;
+        // A provider-signed QR (for example a Paytm merchant QR) must be forwarded
+        // byte-for-byte. Rebuilding/re-encoding its query can invalidate the signature.
+        if (hasSignature) return raw;
+
         final params = <String, String>{...original.queryParameters};
-        // Preserve every QR-provided parameter. NPCI QR/intent interoperability
-        // depends on passing merchant/reference parameters through unchanged.
-        if (!params.containsKey('am') || params['am']!.trim().isEmpty) {
+        if ((params['am'] ?? '').trim().isEmpty && value != null && value > 0) {
           params['am'] = value.toStringAsFixed(2);
         }
         if (!params.containsKey('tn') && note.text.trim().isNotEmpty) {
           params['tn'] = note.text.trim();
         }
-        if (!params.containsKey('cu') || params['cu']!.trim().isEmpty) {
-          params['cu'] = 'INR';
-        }
+        if ((params['cu'] ?? '').trim().isEmpty) params['cu'] = 'INR';
         return original.replace(queryParameters: params).toString();
       }
     }
 
+    if (value == null || value <= 0) {
+      throw const FormatException('A valid amount is required for a manually entered UPI payment.');
+    }
     final params = <String, String>{
       'pa': upi.text.trim(),
-      'pn': payee.text.trim(),
+      'pn': payee.text.trim().isEmpty ? upi.text.trim() : payee.text.trim(),
       'am': value.toStringAsFixed(2),
       'cu': 'INR',
     };
@@ -2235,42 +2600,124 @@ class _PayUpiPageState extends State<PayUpiPage> {
     return Uri(scheme: 'upi', host: 'pay', queryParameters: params).toString();
   }
 
+  Future<String?> _chooseUpiApp(String paymentUri) async {
+    final apps = await NativeBridge.getUpiApps(paymentUri: paymentUri);
+    if (!mounted) return null;
+    if (apps.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No UPI-ready app was found. Open Paytm, PhonePe, Google Pay or BHIM once and finish UPI setup, then try again.')),
+      );
+      return null;
+    }
+    return showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 18),
+          children: [
+            const ListTile(
+              title: Text('Choose how to pay', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
+              subtitle: Text('Only UPI-ready apps detected on this phone are shown.'),
+            ),
+            ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.apps_rounded)),
+              title: const Text('Pay by any UPI app', style: TextStyle(fontWeight: FontWeight.w800)),
+              subtitle: const Text("Use Android's UPI chooser"),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => Navigator.pop(sheetContext, '__ANY__'),
+            ),
+            const Divider(),
+            ...apps.map((app) => ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.account_balance_wallet_outlined)),
+                  title: Text(app.name, style: const TextStyle(fontWeight: FontWeight.w800)),
+                  subtitle: Text(app.packageName, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  trailing: const Icon(Icons.open_in_new_rounded, size: 20),
+                  onTap: () => Navigator.pop(sheetContext, app.packageName),
+                )),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> pay() async {
-    final value = double.tryParse(amount.text.replaceAll(',', '').trim());
-    if (upi.text.trim().isEmpty || payee.text.trim().isEmpty || value == null || value <= 0) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter UPI ID, payee and a valid amount.')));
+    final parsedValue = double.tryParse(amount.text.replaceAll(',', '').trim());
+    final signedStaticQrWithoutAmount = scannedQr && scannedQrSigned && !scannedQrHasFixedAmount &&
+        ((Uri.tryParse(scannedRawQr ?? '')?.queryParameters['am'] ?? '').trim().isEmpty);
+
+    if (upi.text.trim().isEmpty || !upi.text.trim().contains('@')) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter or scan a valid UPI ID.')));
       return;
     }
+    if (!signedStaticQrWithoutAmount && (parsedValue == null || parsedValue <= 0)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter a valid amount.')));
+      return;
+    }
+    final minAmount = scannedMinimumAmount;
+    if (parsedValue != null && minAmount != null && minAmount > 0 && parsedValue < minAmount) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('This QR requires at least ₹${money(minAmount)}.')));
+      return;
+    }
+
     setState(() => paying = true);
     try {
-      final paymentUri = _buildUpiUri(value);
+      final paymentUri = _buildUpiUri(parsedValue);
+      final selected = await _chooseUpiApp(paymentUri);
+      if (!mounted || selected == null) return;
+
       final result = await NativeBridge.startUpiPayment(
         paymentUri: paymentUri,
+        packageName: selected == '__ANY__' ? null : selected,
       );
       if (!mounted) return;
       if (result.success) {
         final ref = result.txnId.isNotEmpty ? result.txnId : (result.txnRef.isNotEmpty ? result.txnRef : result.approvalRefNo);
-        await AppDb.instance.addUpiTransaction(
-          amount: value,
-          merchant: payee.text.trim(),
-          category: category,
-          note: note.text.trim(),
-          upiReference: ref,
-          rawResponse: result.raw,
-        );
+        // When a signed static QR contains no amount, we deliberately pass it untouched.
+        // The PSP app collects the actual amount; SMS/notification capture records the
+        // authoritative transaction instead of creating a potentially wrong duplicate here.
+        if (parsedValue != null && parsedValue > 0 && !signedStaticQrWithoutAmount) {
+          await AppDb.instance.addUpiTransaction(
+            amount: parsedValue,
+            merchant: payee.text.trim().isEmpty ? upi.text.trim() : payee.text.trim(),
+            category: category,
+            note: note.text.trim(),
+            upiReference: ref,
+            rawResponse: result.raw,
+          );
+        }
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Payment saved with your note.')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(signedStaticQrWithoutAmount
+              ? 'Payment completed. The actual amount will be captured from your bank SMS/notification.'
+              : 'Payment completed and saved.')),
+        );
         amount.clear();
         note.clear();
         setState(() {
           scannedQr = false;
           scannedRawQr = null;
           scannedQrHasFixedAmount = false;
+          scannedMinimumAmount = null;
+          scannedQrSigned = false;
+          scannedQrMerchant = false;
         });
         widget.onChanged();
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Payment not confirmed (${result.status}). Nothing was saved.')));
+        final statusText = result.status == 'pending'
+            ? 'Payment is pending. Nothing was saved yet; bank SMS/notification will confirm it.'
+            : 'Payment not confirmed (${result.status}). Nothing was saved.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(statusText)));
       }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      final message = switch (e.code) {
+        'UPI_APP_NOT_READY' => 'That UPI app is installed but is not ready for this payment. Finish UPI setup in the app or choose another app.',
+        'NO_UPI_APP' => 'No compatible UPI-ready app was found on this phone.',
+        _ => e.message ?? 'Could not open the UPI app.',
+      };
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not open UPI payment: $e')));
     } finally {
@@ -2381,9 +2828,11 @@ class _PayUpiPageState extends State<PayUpiPage> {
             TextField(controller: note, maxLines: 2, decoration: const InputDecoration(labelText: 'Note / remark', hintText: 'Example: Dinner with client')),
             const SizedBox(height: 10),
             Text(
-              scannedQr
-                  ? 'The original QR payment parameters are preserved and passed to the UPI app. Some UPI apps can still block an externally initiated person-to-person payment for their own security checks.'
-                  : 'Android will show compatible UPI apps installed on this phone. Some UPI apps can still block externally initiated person-to-person payments for their own security checks.',
+              scannedQrSigned
+                  ? 'Signed merchant QR detected. Its original UPI payload is passed unchanged so Paytm/PhonePe/GPay/BHIM can verify it correctly.'
+                  : scannedQrMerchant
+                      ? 'Merchant QR detected. Merchant/reference parameters are preserved. You can choose any UPI-ready app found on this phone.'
+                      : 'You can pay with Paytm, Google Pay, PhonePe, BHIM or any other UPI-ready app detected on this phone.',
               style: const TextStyle(color: Colors.black54, height: 1.35),
             ),
             const SizedBox(height: 10),
@@ -2407,7 +2856,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
             FilledButton.icon(
               onPressed: paying ? null : pay,
               icon: paying ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.account_balance_wallet_outlined),
-              label: Text(paying ? 'Opening UPI apps…' : 'Choose UPI app'),
+              label: Text(paying ? 'Opening UPI apps…' : 'Pay with UPI app'),
             ),
           ],
         );
@@ -2425,6 +2874,10 @@ class UpiQrData {
   final String transactionRef;
   final String raw;
   final bool hasAmount;
+  final double? minimumAmount;
+  final bool hasMinimumAmount;
+  final bool hasSignedPayload;
+  final bool isMerchant;
 
   const UpiQrData({
     required this.upiId,
@@ -2434,6 +2887,10 @@ class UpiQrData {
     required this.transactionRef,
     required this.raw,
     required this.hasAmount,
+    required this.minimumAmount,
+    required this.hasMinimumAmount,
+    required this.hasSignedPayload,
+    required this.isMerchant,
   });
 
   static UpiQrData? parse(String raw) {
@@ -2449,6 +2906,11 @@ class UpiQrData {
     final amountText = (uri.queryParameters['am'] ?? '').replaceAll(',', '').trim();
     final parsedAmount = amountText.isEmpty ? null : double.tryParse(amountText);
 
+    final minimumText = (uri.queryParameters['mam'] ?? '').replaceAll(',', '').trim();
+    final minimumAmount = minimumText.isEmpty ? null : double.tryParse(minimumText);
+    final hasSignature = (uri.queryParameters['sign'] ?? '').trim().isNotEmpty;
+    final merchantSignals = <String>['mc', 'tr', 'mode', 'orgid', 'paytmqr', 'sign'];
+
     return UpiQrData(
       upiId: upiId,
       payeeName: (uri.queryParameters['pn'] ?? '').trim(),
@@ -2457,6 +2919,10 @@ class UpiQrData {
       transactionRef: (uri.queryParameters['tr'] ?? '').trim(),
       raw: value,
       hasAmount: amountText.isNotEmpty && parsedAmount != null && parsedAmount > 0,
+      minimumAmount: minimumAmount,
+      hasMinimumAmount: minimumAmount != null && minimumAmount > 0,
+      hasSignedPayload: hasSignature,
+      isMerchant: merchantSignals.any((key) => (uri.queryParameters[key] ?? '').trim().isNotEmpty),
     );
   }
 }
@@ -3996,13 +4462,15 @@ Future<bool> showAddTransaction(BuildContext context) async {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   TextField(
-                    controller: amount,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    decoration: const InputDecoration(
-                      labelText: 'Amount',
-                      prefixText: '₹ ',
-                    ),
-                  ),
+              controller: amount,
+              readOnly: scannedQrHasFixedAmount,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: InputDecoration(
+                labelText: 'Amount',
+                prefixText: '₹ ',
+                helperText: scannedQrHasFixedAmount ? 'Amount supplied by this QR and kept unchanged for payment compatibility.' : null,
+              ),
+            ),
                   const SizedBox(height: 10),
                   TextField(controller: merchant, decoration: const InputDecoration(labelText: 'Merchant / person')),
                   const SizedBox(height: 10),
@@ -4111,14 +4579,14 @@ Future<void> editTransaction(BuildContext context, TxRecord tx) async {
                     title: const Text('Apply this correction?'),
                     content: Text(
                       similarCount > 0
-                          ? 'There are $similarCount similar existing transaction${similarCount == 1 ? '' : 's'}. You can update only this one, or update similar transactions and teach the same rule for future messages.'
-                          : 'Do you want this correction only for this transaction, or should the app also remember it for future similar messages?',
+                          ? 'There are $similarCount existing transaction${similarCount == 1 ? '' : 's'} with the same message pattern. You can update only this one, or apply the correction to that pattern and future matching messages.'
+                          : 'Do you want this correction only for this transaction, or should the app remember the stable message pattern (payee/purpose + context) for future matching messages?',
                     ),
                     actions: [
                       TextButton(onPressed: () => Navigator.pop(scopeContext, 'one'), child: const Text('Only this')),
                       FilledButton(
                         onPressed: () => Navigator.pop(scopeContext, 'all'),
-                        child: Text(similarCount > 0 ? 'All similar + future' : 'Remember for future'),
+                        child: Text(similarCount > 0 ? 'Same pattern + future' : 'Remember for future'),
                       ),
                     ],
                   ),
@@ -4151,7 +4619,7 @@ Future<void> editTransaction(BuildContext context, TxRecord tx) async {
                     SnackBar(
                       content: Text(
                         applyAll
-                            ? 'Updated ${updatedSimilar + 1} transaction${updatedSimilar == 0 ? '' : 's'} and saved the rule for future messages.'
+                            ? 'Updated ${updatedSimilar + 1} transaction${updatedSimilar == 0 ? '' : 's'} and saved the message-pattern rule for future messages.'
                             : 'Updated this transaction only.',
                       ),
                     ),

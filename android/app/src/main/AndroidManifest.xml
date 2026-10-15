@@ -9,10 +9,15 @@
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <queries>
+        <!-- Known major UPI apps. The intent query below also discovers any other
+             UPI app installed on the device (BHIM-compatible PSP apps, bank apps, etc.). -->
+        <package android:name="net.one97.paytm" />
+        <package android:name="com.google.android.apps.nbu.paisa.user" />
         <package android:name="com.phonepe.app" />
+        <package android:name="in.org.npci.upiapp" />
         <intent>
             <action android:name="android.intent.action.VIEW" />
-            <data android:scheme="upi" />
+            <data android:scheme="upi" android:host="pay" />
         </intent>
     </queries>
 
