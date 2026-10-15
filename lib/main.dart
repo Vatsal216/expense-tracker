@@ -2657,7 +2657,7 @@ class _PayUpiPageState extends State<PayUpiPage> {
     }
     final minAmount = scannedMinimumAmount;
     if (parsedValue != null && minAmount != null && minAmount > 0 && parsedValue < minAmount) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('This QR requires at least ₹${money(minAmount)}.')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('This QR requires at least ₹${money.format(minAmount)}.')));
       return;
     }
 
@@ -4463,12 +4463,12 @@ Future<bool> showAddTransaction(BuildContext context) async {
                 children: [
                   TextField(
               controller: amount,
-              readOnly: scannedQrHasFixedAmount,
+              readOnly: false,
               keyboardType: const TextInputType.numberWithOptions(decimal: true),
               decoration: InputDecoration(
                 labelText: 'Amount',
                 prefixText: '₹ ',
-                helperText: scannedQrHasFixedAmount ? 'Amount supplied by this QR and kept unchanged for payment compatibility.' : null,
+                helperText: null,
               ),
             ),
                   const SizedBox(height: 10),
