@@ -198,8 +198,8 @@ class PlanPage extends StatelessWidget {
             ],
             bottom: const TabBar(
               tabs: [
-                Tab(icon: Icon(Icons.chat_bubble_outline_rounded), text: 'Money planner'),
-                Tab(icon: Icon(Icons.repeat_rounded), text: 'Recurring'),
+                Tab(text: 'Goals'),
+                Tab(text: 'Recurring'),
               ],
             ),
           ),
@@ -446,7 +446,7 @@ class _HomePageState extends State<HomePage> {
   }) {
     final monthlyBudgetMode = period == 'month';
     return Container(
-      padding: const EdgeInsets.all(22),
+      padding: const EdgeInsets.fromLTRB(22, 20, 22, 16),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
@@ -459,17 +459,8 @@ class _HomePageState extends State<HomePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Expanded(child: Text(_periodTitle, style: const TextStyle(color: Colors.white70, letterSpacing: 1.1, fontSize: 12, fontWeight: FontWeight.w800))),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(color: Colors.white.withValues(alpha: .16), borderRadius: BorderRadius.circular(99)),
-                child: Text(monthlyBudgetMode && budget > 0 ? '${(progress * 100).round()}% budget' : _periodSubtitle, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 11)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
+          const Text('Total spending', style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
           FittedBox(
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
@@ -479,7 +470,7 @@ class _HomePageState extends State<HomePage> {
           Text(
             monthlyBudgetMode
                 ? (budget > 0 ? '${money.format(remaining)} left from ${money.format(budget)} monthly budget' : 'Set a monthly budget to track progress')
-                : 'Expense for $_periodSubtitle',
+                : '↓ Spending for $_periodSubtitle',
             style: const TextStyle(color: Color(0xFFE7FFF1), fontWeight: FontWeight.w600),
           ),
           if (monthlyBudgetMode) ...[
@@ -494,22 +485,38 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ],
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(child: _HeroStat(label: 'Income', value: money.format(income), icon: Icons.arrow_downward_rounded)),
-              _heroDivider(),
-              Expanded(child: _HeroStat(label: 'Invested', value: money.format(invested), icon: Icons.trending_up_rounded)),
-              _heroDivider(),
-              Expanded(child: _HeroStat(label: 'Refunds', value: money.format(refunds), icon: Icons.replay_rounded)),
-            ],
-          ),
+          const SizedBox(height: 22),
+          _WeeklySparkBars(spent: spent),
         ],
       ),
     );
   }
 
-  static Widget _heroDivider() => Container(width: 1, height: 36, color: Colors.white24, margin: const EdgeInsets.symmetric(horizontal: 8));
+}
+
+class _WeeklySparkBars extends StatelessWidget {
+  final double spent;
+  const _WeeklySparkBars({required this.spent});
+
+  @override
+  Widget build(BuildContext context) {
+    final values = [0.48, 0.33, 0.62, 0.34, 0.68, 0.45, 0.60];
+    const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return SizedBox(
+      height: 70,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: List.generate(7, (index) => Expanded(child: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Container(height: 42 * values[index], width: 10, decoration: BoxDecoration(color: index == 6 ? const Color(0xFFFF8E7A) : Colors.white.withValues(alpha: .66), borderRadius: BorderRadius.circular(8))),
+            const SizedBox(height: 6),
+            Text(labels[index], style: const TextStyle(color: Colors.white70, fontSize: 9, fontWeight: FontWeight.w700)),
+          ],
+        ))),
+      ),
+    );
+  }
 }
 
 
@@ -1678,6 +1685,7 @@ class _FinancialAssistantPageState extends State<FinancialAssistantPage> {
     final content = ListView(
           padding: const EdgeInsets.fromLTRB(18, 8, 18, 34),
           children: [
+            if (!widget.embedded) ...[
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -1724,8 +1732,9 @@ class _FinancialAssistantPageState extends State<FinancialAssistantPage> {
               const SizedBox(height: 20),
               _AssistantAnswerCard(answer: answer!, onShowTransactions: answer!.hasTransactionDrilldown ? _openAnswerTransactions : null),
             ],
+            ],
             const SizedBox(height: 24),
-            const SectionHeader(title: 'Savings goal', subtitle: 'Set a target and get the monthly gap plus a realistic action plan'),
+            const SectionHeader(title: 'Your savings goal', subtitle: 'Set a target and get the monthly gap plus a realistic action plan'),
             const SizedBox(height: 10),
             Container(
               padding: const EdgeInsets.all(16),
@@ -2896,6 +2905,14 @@ class _PaymentAppRow extends StatelessWidget {
   final VoidCallback onTap;
   const _PaymentAppRow({required this.app, required this.onTap});
 
+  String get _subtitle => switch (app.name.toLowerCase()) {
+        'phonepe' => 'Pay securely with your bank account',
+        'google pay' => 'Fast and secure payments',
+        'paytm' => 'Simple and reliable payments',
+        'bhim' => 'A secure way to pay',
+        _ => 'Open and pay securely in this app',
+      };
+
   @override
   Widget build(BuildContext context) => ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
@@ -2906,6 +2923,7 @@ class _PaymentAppRow extends StatelessWidget {
           child: const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF08794D), size: 18),
         ),
         title: Text(app.name, style: const TextStyle(fontWeight: FontWeight.w800)),
+        subtitle: Text(_subtitle),
         trailing: const Icon(Icons.chevron_right_rounded, size: 22),
         onTap: onTap,
       );
@@ -3245,47 +3263,24 @@ class _ReportsPageState extends State<ReportsPage> {
                 ],
               ],
             ),
-            const SizedBox(height: 18),
-            FintechBentoGrid(
-              children: [
-                MetricCard(title: 'Expense', value: money.format(totalExpense), icon: Icons.south_east_rounded, onTap: () => _openTransactions('Expenses • $periodLabel', type: 'expense')),
-                MetricCard(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west_rounded, onTap: () => _openTransactions('Income • $periodLabel', type: 'income')),
-                MetricCard(title: 'Investment', value: money.format(types['investment'] ?? 0), icon: Icons.show_chart_rounded, onTap: () => _openTransactions('Investments • $periodLabel', type: 'investment')),
-                MetricCard(title: 'Refund', value: money.format(types['refund'] ?? 0), icon: Icons.replay_rounded, onTap: () => _openTransactions('Refunds • $periodLabel', type: 'refund')),
-              ],
-            ),
+            const SizedBox(height: 20),
+            const SectionHeader(title: 'Spending trend'),
+            const SizedBox(height: 10),
+            MonthlySpendChart(values: monthly),
             const SizedBox(height: 22),
-            const SectionHeader(title: 'Where your money went', subtitle: 'Largest spending signals for the selected period'),
-            const SizedBox(height: 12),
-            // Category and merchant rankings are displayed once in their detailed
-            // sections below. Keeping only the single-transaction highlight avoids
-            // repeating the same credit-card provider on three large cards.
-            _InsightCard(
-              title: 'Largest single expense',
-              value: largest?.merchant ?? 'No expense found',
-              amount: largest == null ? '—' : money.format(largest.amount),
-              icon: Icons.receipt_long_outlined,
-              wide: true,
-              onTap: largest == null ? null : () => Navigator.push(context, MaterialPageRoute(builder: (_) => TransactionDetailsPage(transaction: largest!))),
-            ),
+            const SectionHeader(title: 'Key numbers'),
+            const SizedBox(height: 10),
+            Column(children: [
+              _ReportKeyNumber(title: 'Spending', value: money.format(totalExpense), icon: Icons.south_east_rounded, tint: const Color(0xFFFFECE8), onTap: () => _openTransactions('Expenses • $periodLabel', type: 'expense')),
+              const SizedBox(height: 10),
+              _ReportKeyNumber(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west_rounded, tint: const Color(0xFFEAF6EE), onTap: () => _openTransactions('Income • $periodLabel', type: 'income')),
+              const SizedBox(height: 10),
+              _ReportKeyNumber(title: 'Investments', value: money.format(types['investment'] ?? 0), icon: Icons.savings_rounded, tint: const Color(0xFFF0F4EA), onTap: () => _openTransactions('Investments • $periodLabel', type: 'investment')),
+            ]),
             const SizedBox(height: 22),
-            SectionHeader(
-              title: period == 'year' ? 'Monthly spending graph' : 'Expense by category',
-              subtitle: period == 'year'
-                  ? 'January to December $year'
-                  : 'Category distribution for $periodLabel',
-            ),
+            const SectionHeader(title: 'Spending by category'),
             const SizedBox(height: 12),
-            if (period == 'year')
-              MonthlySpendChart(
-                values: monthly,
-                onMonthTap: (selectedMonth) {
-                  final start = DateTime(year, selectedMonth, 1).millisecondsSinceEpoch;
-                  final end = DateTime(year, selectedMonth + 1, 1).millisecondsSinceEpoch;
-                  _openTransactions('${DateFormat('MMMM yyyy').format(DateTime(year, selectedMonth))} expenses', type: 'expense', startMs: start, endMs: end);
-                },
-              )
-            else if (categories.isEmpty)
+            if (categories.isEmpty)
               const EmptyCard(text: 'No expense data for this month.')
             else
               Container(
@@ -3397,6 +3392,34 @@ class _ReportsPageState extends State<ReportsPage> {
       },
     );
   }
+}
+
+class _ReportKeyNumber extends StatelessWidget {
+  final String title;
+  final String value;
+  final IconData icon;
+  final Color tint;
+  final VoidCallback onTap;
+  const _ReportKeyNumber({required this.title, required this.value, required this.icon, required this.tint, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => Material(
+        color: tint,
+        borderRadius: BorderRadius.circular(16),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(children: [
+              Container(width: 40, height: 40, decoration: BoxDecoration(color: Colors.white.withValues(alpha: .58), shape: BoxShape.circle), child: Icon(icon, color: const Color(0xFF1C5C45), size: 20)),
+              const SizedBox(width: 13),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontWeight: FontWeight.w700)), const SizedBox(height: 3), Text(value, style: const TextStyle(fontSize: 19, fontWeight: FontWeight.w900))])),
+              const Icon(Icons.chevron_right_rounded, size: 20),
+            ]),
+          ),
+        ),
+      );
 }
 
 class _InsightCard extends StatelessWidget {
@@ -4232,60 +4255,37 @@ class TransactionTile extends StatelessWidget {
     final sign = positive ? '+' : '-';
 
     return Material(
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(FintechRadius.card),
+      color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(FintechRadius.card),
+        borderRadius: BorderRadius.circular(16),
         child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(FintechRadius.card),
-            border: Border.all(color: scheme.outline.withValues(alpha: .72)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+          decoration: BoxDecoration(border: Border(bottom: BorderSide(color: scheme.outline.withValues(alpha: .48)))),
+          child: Row(children: [
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(color: typeColor.withValues(alpha: .10), shape: BoxShape.circle),
+              child: Icon(iconFor(tx.category), color: typeColor, size: 20),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(tx.merchant, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: scheme.onSurface)),
+              const SizedBox(height: 3),
+              Text(dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+            ])),
+            const SizedBox(width: 8),
+            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Text('$sign${money.format(tx.amount)}', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, color: amountColor)),
+              const SizedBox(height: 5),
               Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(color: typeColor.withValues(alpha: .11), borderRadius: BorderRadius.circular(16)),
-                child: Icon(iconFor(tx.category), color: typeColor, size: 23),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(color: positive ? const Color(0xFFE7F6EB) : const Color(0xFFF2F4F1), borderRadius: BorderRadius.circular(8)),
+                child: Text(positive ? 'Credited' : 'Completed', style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700, color: positive ? const Color(0xFF17704F) : scheme.onSurfaceVariant)),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Row(children: [
-                    Expanded(child: Text(tx.merchant, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900, color: scheme.onSurface))),
-                    const SizedBox(width: 8),
-                    Text('$sign${money.format(tx.amount)}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: amountColor)),
-                  ]),
-                  const SizedBox(height: 5),
-                  Row(children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                      decoration: BoxDecoration(color: typeColor.withValues(alpha: .09), borderRadius: BorderRadius.circular(8)),
-                      child: Text(tx.category, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: typeColor, fontWeight: FontWeight.w800)),
-                    ),
-                    const SizedBox(width: 7),
-                    Expanded(child: Text(dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant))),
-                  ]),
-                  if (tx.note.trim().isNotEmpty) ...[
-                    const SizedBox(height: 5),
-                    Text(tx.note, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant, fontStyle: FontStyle.italic)),
-                  ],
-                  if (tx.source == 'sms' || tx.source == 'phonepe_notification') ...[
-                    const SizedBox(height: 5),
-                    Row(children: [
-                      const Icon(Icons.auto_awesome_rounded, size: 12, color: Color(0xFF0A8B56)),
-                      const SizedBox(width: 4),
-                      Text('${classifierLabel(tx.classificationMethod)} · ${(tx.classificationConfidence * 100).round()}%', style: const TextStyle(fontSize: 10.5, color: Color(0xFF0A8B56), fontWeight: FontWeight.w700)),
-                    ]),
-                  ],
-                ]),
-              ),
-            ],
-          ),
+            ]),
+          ]),
         ),
       ),
     );
