@@ -79,6 +79,45 @@ class TxRecord {
       );
 }
 
+class PaymentCardRecord {
+  final int? id;
+  final String name;
+  final String issuer;
+  final String lastFour;
+  final String cardType;
+  final double creditLimit;
+
+  const PaymentCardRecord({this.id, required this.name, required this.issuer, required this.lastFour, required this.cardType, required this.creditLimit});
+
+  factory PaymentCardRecord.fromMap(Map<String, Object?> map) => PaymentCardRecord(
+        id: map['id'] as int?,
+        name: map['name'] as String,
+        issuer: (map['issuer'] as String?) ?? '',
+        lastFour: (map['last_four'] as String?) ?? '',
+        cardType: (map['card_type'] as String?) ?? 'credit',
+        creditLimit: ((map['credit_limit'] as num?) ?? 0).toDouble(),
+      );
+}
+
+class CardLedgerEntry {
+  final int? id;
+  final int cardId;
+  final int? transactionId;
+  final String entryType;
+  final double amount;
+  final int occurredAt;
+  final String merchant;
+  final String note;
+
+  const CardLedgerEntry({this.id, required this.cardId, this.transactionId, required this.entryType, required this.amount, required this.occurredAt, required this.merchant, required this.note});
+
+  factory CardLedgerEntry.fromMap(Map<String, Object?> map) => CardLedgerEntry(
+        id: map['id'] as int?, cardId: map['card_id'] as int, transactionId: (map['transaction_id'] as num?)?.toInt(),
+        entryType: map['entry_type'] as String, amount: (map['amount'] as num).toDouble(), occurredAt: map['occurred_at'] as int,
+        merchant: (map['merchant'] as String?) ?? '', note: (map['note'] as String?) ?? '',
+      );
+}
+
 class MerchantRule {
   final int? id;
   final String merchant;

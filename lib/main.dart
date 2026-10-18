@@ -9,6 +9,7 @@ import 'enhancements.dart';
 import 'financial_ai.dart';
 import 'financial_ai_agent.dart';
 import 'fintech_design.dart';
+import 'cards_page.dart';
 
 const txTypes = ['expense', 'investment', 'income', 'transfer', 'refund'];
 final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
@@ -147,6 +148,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       HomePage(onChanged: refresh, onNavigate: navigateTo),
       TransactionsPage(key: ValueKey('tx-$refreshToken'), onChanged: refresh),
       PayUpiPage(key: ValueKey('pay-$refreshToken'), onChanged: refresh),
+      CardsPage(key: ValueKey('cards-$refreshToken'), onChanged: refresh),
       PlanPage(key: ValueKey('plan-$refreshToken')),
       ReportsPage(key: ValueKey('report-$refreshToken')),
       SettingsPage(key: ValueKey('settings-$refreshToken'), onChanged: refresh),
@@ -169,6 +171,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Home'),
               NavigationDestination(icon: Icon(Icons.receipt_long_rounded), label: 'Activity'),
               NavigationDestination(icon: Icon(Icons.qr_code_2_rounded), label: 'Pay'),
+              NavigationDestination(icon: Icon(Icons.credit_card_rounded), label: 'Cards'),
               NavigationDestination(icon: Icon(Icons.savings_outlined), selectedIcon: Icon(Icons.savings_rounded), label: 'Plan'),
               NavigationDestination(icon: Icon(Icons.insights_rounded), label: 'Reports'),
               NavigationDestination(icon: Icon(Icons.settings_rounded), label: 'Settings'),
@@ -190,10 +193,13 @@ class PlanPage extends StatelessWidget {
           appBar: AppBar(
             title: const Text('Plan'),
             actions: [
-              IconButton(
-                tooltip: 'AI Advisor',
-                icon: const Icon(Icons.auto_awesome_rounded),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorPage())),
+              Tooltip(
+                message: 'AI Advisor',
+                child: TextButton.icon(
+                  icon: const Icon(Icons.auto_awesome_rounded, size: 18),
+                  label: const Text('AI Advisor'),
+                  onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorPage())),
+                ),
               ),
             ],
             bottom: const TabBar(
@@ -322,6 +328,7 @@ class _HomePageState extends State<HomePage> {
       AppDb.instance.overallBudget(),
       AppDb.instance.searchTransactions(startMs: range.$1, endMs: range.$2, limit: 6),
       AppDb.instance.reviewTransactions(),
+      AppDb.instance.expenseTrendForPeriod(range.$1, range.$2),
     ]);
   }
 
@@ -337,6 +344,7 @@ class _HomePageState extends State<HomePage> {
         final budget = snap.data![1] as double;
         final recent = snap.data![2] as List<TxRecord>;
         final review = snap.data![3] as List<TxRecord>;
+        final trend = snap.data![4] as List<double>;
         final spent = totals['expense'] ?? 0;
         final invested = totals['investment'] ?? 0;
         final income = totals['income'] ?? 0;
@@ -374,7 +382,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 18),
               Align(alignment: Alignment.centerLeft, child: _periodMenu()),
               const SizedBox(height: 16),
-              _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress),
+              _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress, trend: trend),
               const SizedBox(height: 22),
               const SizedBox(height: 24),
               SectionHeader(
@@ -443,6 +451,7 @@ class _HomePageState extends State<HomePage> {
     required double budget,
     required double remaining,
     required double progress,
+    required List<double> trend,
   }) {
     final monthlyBudgetMode = period == 'month';
     return Container(
@@ -486,7 +495,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
           const SizedBox(height: 22),
-          _WeeklySparkBars(spent: spent),
+          _WeeklySparkBars(values: trend, period: period),
         ],
       ),
     );
@@ -495,13 +504,16 @@ class _HomePageState extends State<HomePage> {
 }
 
 class _WeeklySparkBars extends StatelessWidget {
-  final double spent;
-  const _WeeklySparkBars({required this.spent});
+  final List<double> values;
+  final String period;
+  const _WeeklySparkBars({required this.values, required this.period});
 
   @override
   Widget build(BuildContext context) {
-    final values = [0.48, 0.33, 0.62, 0.34, 0.68, 0.45, 0.60];
-    const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final maximum = values.fold<double>(0, (maxValue, item) => item > maxValue ? item : maxValue);
+    final labels = period == 'week'
+        ? const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        : const ['1', '2', '3', '4', '5', '6', '7'];
     return SizedBox(
       height: 70,
       child: Row(
@@ -509,7 +521,7 @@ class _WeeklySparkBars extends StatelessWidget {
         children: List.generate(7, (index) => Expanded(child: Column(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
-            Container(height: 42 * values[index], width: 10, decoration: BoxDecoration(color: index == 6 ? const Color(0xFFFF8E7A) : Colors.white.withValues(alpha: .66), borderRadius: BorderRadius.circular(8))),
+            Container(height: maximum <= 0 ? 6 : 8 + (34 * (values[index] / maximum)), width: 10, decoration: BoxDecoration(color: index == values.length - 1 ? const Color(0xFFFF8E7A) : Colors.white.withValues(alpha: .66), borderRadius: BorderRadius.circular(8))),
             const SizedBox(height: 6),
             Text(labels[index], style: const TextStyle(color: Colors.white70, fontSize: 9, fontWeight: FontWeight.w700)),
           ],
@@ -1733,6 +1745,23 @@ class _FinancialAssistantPageState extends State<FinancialAssistantPage> {
               _AssistantAnswerCard(answer: answer!, onShowTransactions: answer!.hasTransactionDrilldown ? _openAnswerTransactions : null),
             ],
             ],
+            if (widget.embedded) ...[
+              FintechSurface(
+                onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorPage())),
+                tint: const Color(0xFFEAF6EE),
+                child: const Row(children: [
+                  CircleAvatar(child: Icon(Icons.auto_awesome_rounded)),
+                  SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('AI Advisor', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+                    SizedBox(height: 2),
+                    Text('Ask questions using your selected AI provider'),
+                  ])),
+                  Icon(Icons.chevron_right_rounded),
+                ]),
+              ),
+              const SizedBox(height: 18),
+            ],
             const SizedBox(height: 24),
             const SectionHeader(title: 'Your savings goal', subtitle: 'Set a target and get the monthly gap plus a realistic action plan'),
             const SizedBox(height: 10),
@@ -2919,8 +2948,11 @@ class _PaymentAppRow extends StatelessWidget {
         leading: Container(
           width: 34,
           height: 34,
+          clipBehavior: Clip.antiAlias,
           decoration: BoxDecoration(color: const Color(0xFFEAF5EF), borderRadius: BorderRadius.circular(10)),
-          child: const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF08794D), size: 18),
+          child: app.iconBytes == null
+              ? const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF08794D), size: 18)
+              : Image.memory(app.iconBytes!, fit: BoxFit.cover),
         ),
         title: Text(app.name, style: const TextStyle(fontWeight: FontWeight.w800)),
         subtitle: Text(_subtitle),
@@ -3165,6 +3197,7 @@ class _ReportsPageState extends State<ReportsPage> {
       await AppDb.instance.expenseByMerchantForPeriod(range.$1, range.$2),
       await AppDb.instance.largestExpenseForPeriod(range.$1, range.$2),
       await AppDb.instance.monthlyExpenseForYear(year),
+      await AppDb.instance.expenseTrendForPeriod(range.$1, range.$2, buckets: 5),
     ];
   }
 
@@ -3203,6 +3236,11 @@ class _ReportsPageState extends State<ReportsPage> {
         final merchants = snap.data![3] as Map<String, double>;
         final largest = snap.data![4] as TxRecord?;
         final monthly = snap.data![5] as List<double>;
+        final selectedMonthTrend = snap.data![6] as List<double>;
+        final trendValues = period == 'year' ? monthly : selectedMonthTrend;
+        final trendLabels = period == 'year'
+            ? const ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D']
+            : const ['Week 1', 'Week 2', 'Week 3', 'Week 4', 'Week 5'];
 
         final topCategory = categories.isEmpty ? null : categories.entries.first;
         final topMerchant = merchants.isEmpty ? null : merchants.entries.first;
@@ -3266,7 +3304,7 @@ class _ReportsPageState extends State<ReportsPage> {
             const SizedBox(height: 20),
             const SectionHeader(title: 'Spending trend'),
             const SizedBox(height: 10),
-            MonthlySpendChart(values: monthly),
+            MonthlySpendChart(values: trendValues, labels: trendLabels),
             const SizedBox(height: 22),
             const SectionHeader(title: 'Key numbers'),
             const SizedBox(height: 10),
@@ -3504,12 +3542,14 @@ class _InsightCard extends StatelessWidget {
 
 class MonthlySpendChart extends StatelessWidget {
   final List<double> values;
+  final List<String>? labels;
   final ValueChanged<int>? onMonthTap;
-  const MonthlySpendChart({super.key, required this.values, this.onMonthTap});
+  const MonthlySpendChart({super.key, required this.values, this.labels, this.onMonthTap});
 
   @override
   Widget build(BuildContext context) {
-    final normalized = List<double>.generate(12, (i) => i < values.length ? values[i] : 0);
+    final normalized = values.isEmpty ? const <double>[0] : values;
+    final axisLabels = labels ?? List<String>.generate(normalized.length, (index) => DateFormat.MMM().format(DateTime(2024, index + 1)).substring(0, 1));
     var maxValue = 0.0;
     for (final v in normalized) {
       if (v > maxValue) maxValue = v;
@@ -3528,7 +3568,7 @@ class MonthlySpendChart extends StatelessWidget {
         children: [
           if (hasData)
             Text(
-              'Peak month: ${DateFormat.MMM().format(DateTime(2024, normalized.indexOf(maxValue) + 1))} · ${money.format(maxValue)}',
+              'Peak period: ${axisLabels[normalized.indexOf(maxValue)]} · ${money.format(maxValue)}',
               style: const TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF4F5D54)),
             )
           else
@@ -3538,7 +3578,7 @@ class MonthlySpendChart extends StatelessWidget {
             height: 170,
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
-              children: List.generate(12, (index) {
+              children: List.generate(normalized.length, (index) {
                 final value = normalized[index];
                 final height = hasData ? (12 + (118 * (value / maxValue))).clamp(12.0, 130.0).toDouble() : 12.0;
                 return Expanded(
@@ -3564,10 +3604,7 @@ class MonthlySpendChart extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        Text(
-                          DateFormat.MMM().format(DateTime(2024, index + 1)).substring(0, 1),
-                          style: const TextStyle(fontSize: 10.5, color: Color(0xFF7B8780), fontWeight: FontWeight.w700),
-                        ),
+                        Text(axisLabels[index], maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5, color: Color(0xFF7B8780), fontWeight: FontWeight.w700)),
                       ],
                     ),
                   ),
@@ -3681,6 +3718,8 @@ class _SettingsPageState extends State<SettingsPage> {
   String reclassifyStatus = 'Re-check imported SMS with the latest safety rules';
   bool phonePeEnabled = false;
   bool notificationAccess = false;
+  List<UpiApp> financialApps = const [];
+  Set<String> trackedNotificationPackages = <String>{};
   bool hybridClassifier = true;
   bool notifications = true;
   bool notificationPermission = false;
@@ -3700,6 +3739,14 @@ class _SettingsPageState extends State<SettingsPage> {
       smsHistoryPermission = await NativeBridge.hasSmsHistoryPermission();
       phonePeEnabled = await AppDb.instance.getBoolSetting('phonepe_notification_enabled');
       notificationAccess = await NativeBridge.hasNotificationListenerPermission();
+      final configuredPackages = await AppDb.instance.getSetting('notification_tracking_packages');
+      trackedNotificationPackages = configuredPackages.split(',').map((item) => item.trim()).where((item) => item.isNotEmpty).toSet();
+      if (trackedNotificationPackages.isEmpty && phonePeEnabled) trackedNotificationPackages.add('com.phonepe.app');
+      try {
+        financialApps = await NativeBridge.getUpiApps(paymentUri: 'upi://pay?pa=expense.tracker%40upi&pn=Expense%20Tracker&am=1&cu=INR');
+      } catch (_) {
+        financialApps = const [];
+      }
       hybridClassifier = await AppDb.instance.getBoolSetting('hybrid_classifier_enabled', fallback: true);
       notifications = await AppDb.instance.getBoolSetting('notifications_enabled', fallback: true);
       notificationPermission = await NativeBridge.hasNotificationPermission();
@@ -3711,6 +3758,27 @@ class _SettingsPageState extends State<SettingsPage> {
     } finally {
       if (mounted) setState(() => loading = false);
     }
+  }
+
+  Future<void> _setFinancialAppTracking(UpiApp app, bool enabled) async {
+    if (enabled && !notificationAccess) {
+      await NativeBridge.openNotificationAccessSettings();
+      notificationAccess = await NativeBridge.hasNotificationListenerPermission();
+      if (!notificationAccess) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enable Notification Access for Expense Tracker, then return and select apps.')));
+        return;
+      }
+    }
+    setState(() {
+      if (enabled) {
+        trackedNotificationPackages.add(app.packageName);
+      } else {
+        trackedNotificationPackages.remove(app.packageName);
+      }
+      phonePeEnabled = trackedNotificationPackages.isNotEmpty;
+    });
+    await AppDb.instance.setSetting('notification_tracking_packages', trackedNotificationPackages.join(','));
+    await AppDb.instance.setSetting('phonepe_notification_enabled', phonePeEnabled ? '1' : '0');
   }
 
   Future<void> importPreviousSms() async {
@@ -3870,23 +3938,36 @@ class _SettingsPageState extends State<SettingsPage> {
               onTap: reclassifyingSms ? null : reclassifyExistingSms,
             ),
             const Divider(),
-            SwitchListTile(
-              value: phonePeEnabled,
-              secondary: const Icon(Icons.notifications_active_outlined),
-              title: const Text('PhonePe Notification Tracking'),
-              subtitle: Text(notificationAccess ? 'Read new PhonePe transaction notifications locally' : 'Android Notification Access required'),
-              onChanged: (v) async {
-                if (v) {
-                  notificationAccess = await NativeBridge.hasNotificationListenerPermission();
-                  if (!notificationAccess) await NativeBridge.openNotificationAccessSettings();
-                  phonePeEnabled = true;
-                } else {
-                  phonePeEnabled = false;
-                }
-                await AppDb.instance.setSetting('phonepe_notification_enabled', phonePeEnabled ? '1' : '0');
-                if (mounted) setState(() {});
-              },
+            ListTile(
+              leading: const Icon(Icons.account_balance_wallet_outlined),
+              title: const Text('Financial app notification tracking'),
+              subtitle: Text(notificationAccess
+                  ? 'Choose the installed payment apps whose transaction notifications you want to track locally.'
+                  : 'Android Notification Access is required before tracking any app.'),
+              trailing: Text('${trackedNotificationPackages.length} selected'),
             ),
+            if (financialApps.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.info_outline_rounded),
+                title: Text('No supported payment app detected'),
+                subtitle: Text('Open or finish UPI setup in your payment app, then reopen Settings.'),
+              )
+            else
+              ...financialApps.map((app) => SwitchListTile(
+                    value: trackedNotificationPackages.contains(app.packageName),
+                    secondary: Container(
+                      width: 32,
+                      height: 32,
+                      clipBehavior: Clip.antiAlias,
+                      decoration: BoxDecoration(color: const Color(0xFFEAF5EF), borderRadius: BorderRadius.circular(9)),
+                      child: app.iconBytes == null
+                          ? const Icon(Icons.account_balance_wallet_rounded, size: 18)
+                          : Image.memory(app.iconBytes!, fit: BoxFit.cover),
+                    ),
+                    title: Text(app.name),
+                    subtitle: const Text('Read only its new transaction notifications on this device'),
+                    onChanged: (value) => _setFinancialAppTracking(app, value),
+                  )),
             if (!notificationAccess)
               ListTile(
                 leading: const Icon(Icons.security_outlined),

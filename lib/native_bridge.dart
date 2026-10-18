@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/services.dart';
 
 class UpiResult {
@@ -36,13 +39,20 @@ class UpiApp {
   final String packageName;
   final String name;
   final bool known;
+  final String iconBase64;
 
-  const UpiApp({required this.packageName, required this.name, required this.known});
+  const UpiApp({required this.packageName, required this.name, required this.known, this.iconBase64 = ''});
+
+  Uint8List? get iconBytes {
+    if (iconBase64.isEmpty) return null;
+    try { return base64Decode(iconBase64); } catch (_) { return null; }
+  }
 
   factory UpiApp.fromMap(Map<dynamic, dynamic> map) => UpiApp(
         packageName: '${map['packageName'] ?? ''}',
         name: '${map['name'] ?? 'UPI app'}',
         known: map['known'] == true,
+        iconBase64: '${map['iconBase64'] ?? ''}',
       );
 }
 

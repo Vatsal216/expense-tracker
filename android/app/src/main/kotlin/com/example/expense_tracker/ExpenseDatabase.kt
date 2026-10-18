@@ -198,6 +198,7 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
 
         settingIfMissing(db, "sms_tracking_enabled", "0")
         settingIfMissing(db, "phonepe_notification_enabled", "0")
+        settingIfMissing(db, "notification_tracking_packages", "")
         settingIfMissing(db, "notifications_enabled", "1")
         settingIfMissing(db, "daily_summary_enabled", "1")
         settingIfMissing(db, "daily_summary_hour", "21")

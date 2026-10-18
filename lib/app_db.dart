@@ -148,10 +148,34 @@ class AppDb {
       balance REAL NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL
     )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS payment_cards(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      issuer TEXT NOT NULL DEFAULT '',
+      last_four TEXT NOT NULL DEFAULT '',
+      card_type TEXT NOT NULL DEFAULT 'credit',
+      credit_limit REAL NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS card_ledger_entries(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id INTEGER NOT NULL,
+      transaction_id INTEGER,
+      entry_type TEXT NOT NULL,
+      amount REAL NOT NULL,
+      merchant TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      occurred_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(card_id) REFERENCES payment_cards(id) ON DELETE CASCADE,
+      FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON DELETE SET NULL,
+      UNIQUE(card_id, transaction_id)
+    )''');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_time ON transactions(occurred_at)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_amount ON transactions(amount)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_review ON transactions(review_status)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_normalized_merchant ON transactions(normalized_merchant)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_card_ledger_card_time ON card_ledger_entries(card_id, occurred_at)');
   }
 
   Future<void> _ensureColumn(Database db, String table, String column, String definition) async {
@@ -277,6 +301,108 @@ class AppDb {
     final db = await database;
     final rows = await db.query('transactions', where: "review_status='accepted'", orderBy: 'occurred_at DESC', limit: limit);
     return rows.map(TxRecord.fromMap).toList();
+  }
+
+  Future<List<PaymentCardRecord>> paymentCards() async {
+    final db = await database;
+    final rows = await db.query('payment_cards', orderBy: 'created_at DESC');
+    return rows.map(PaymentCardRecord.fromMap).toList();
+  }
+
+  Future<int> addPaymentCard({required String name, required String issuer, required String lastFour, required String cardType, required double creditLimit}) async {
+    final db = await database;
+    return db.insert('payment_cards', {
+      'name': name.trim(), 'issuer': issuer.trim(), 'last_four': lastFour.replaceAll(RegExp(r'\D'), '').trim(),
+      'card_type': cardType, 'credit_limit': creditLimit, 'created_at': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  Future<void> deletePaymentCard(int id) async {
+    final db = await database;
+    await db.delete('payment_cards', where: 'id=?', whereArgs: [id]);
+  }
+
+  Future<void> addCardLedgerEntry({required int cardId, int? transactionId, required String entryType, required double amount, required int occurredAt, required String merchant, String note = ''}) async {
+    final db = await database;
+    await db.insert('card_ledger_entries', {
+      'card_id': cardId, 'transaction_id': transactionId, 'entry_type': entryType, 'amount': amount,
+      'merchant': merchant.trim(), 'note': note.trim(), 'occurred_at': occurredAt, 'created_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.ignore);
+  }
+
+  Future<void> markCardBillPaid({required int cardId, required double amount, required int occurredAt}) =>
+      addCardLedgerEntry(cardId: cardId, entryType: 'payment', amount: amount, occurredAt: occurredAt, merchant: 'Credit card bill payment', note: 'Marked as paid');
+
+  Future<List<CardLedgerEntry>> cardLedger(int cardId, {required int startMs, required int endMs}) async {
+    final db = await database;
+    final rows = await db.query('card_ledger_entries', where: 'card_id=? AND occurred_at>=? AND occurred_at<?', whereArgs: [cardId, startMs, endMs], orderBy: 'occurred_at DESC');
+    return rows.map(CardLedgerEntry.fromMap).toList();
+  }
+
+  Future<Map<String, double>> cardTotals(int cardId, {int? startMs, int? endMs}) async {
+    final db = await database;
+    final clauses = <String>['card_id=?'];
+    final args = <Object>[cardId];
+    if (startMs != null) { clauses.add('occurred_at>=?'); args.add(startMs); }
+    if (endMs != null) { clauses.add('occurred_at<?'); args.add(endMs); }
+    final rows = await db.rawQuery('SELECT entry_type, COALESCE(SUM(amount),0) total FROM card_ledger_entries WHERE ${clauses.join(' AND ')} GROUP BY entry_type', args);
+    return {for (final row in rows) row['entry_type'] as String: (row['total'] as num).toDouble()};
+  }
+
+  /// Linked SMS entries keep their classified merchant/category. Manual entries
+  /// are still represented, under a clear fallback label.
+  Future<List<Map<String, Object?>>> cardSpendByCategory(int cardId, {required int startMs, required int endMs}) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT COALESCE(NULLIF(t.category, ''), 'Other card spending') AS label, SUM(l.amount) AS total
+      FROM card_ledger_entries l LEFT JOIN transactions t ON t.id=l.transaction_id
+      WHERE l.card_id=? AND l.entry_type='purchase' AND l.occurred_at>=? AND l.occurred_at<?
+      GROUP BY COALESCE(NULLIF(t.category, ''), 'Other card spending')
+      ORDER BY total DESC LIMIT 6
+    ''', [cardId, startMs, endMs]);
+  }
+
+  Future<List<Map<String, Object?>>> cardSpendByMerchant(int cardId, {required int startMs, required int endMs}) async {
+    final db = await database;
+    return db.rawQuery('''
+      SELECT COALESCE(NULLIF(l.merchant, ''), NULLIF(t.normalized_merchant, ''), NULLIF(t.merchant, ''), 'Unidentified merchant') AS label, SUM(l.amount) AS total
+      FROM card_ledger_entries l LEFT JOIN transactions t ON t.id=l.transaction_id
+      WHERE l.card_id=? AND l.entry_type='purchase' AND l.occurred_at>=? AND l.occurred_at<?
+      GROUP BY COALESCE(NULLIF(l.merchant, ''), NULLIF(t.normalized_merchant, ''), NULLIF(t.merchant, ''), 'Unidentified merchant')
+      ORDER BY total DESC LIMIT 6
+    ''', [cardId, startMs, endMs]);
+  }
+
+  Future<List<Map<String, Object?>>> cardMonthlySpend(int cardId, int selectedYear) async {
+    final db = await database;
+    final start = DateTime(selectedYear, 1, 1).millisecondsSinceEpoch;
+    final end = DateTime(selectedYear + 1, 1, 1).millisecondsSinceEpoch;
+    final rows = await db.rawQuery('''
+      SELECT CAST(strftime('%m', occurred_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS month, SUM(amount) AS total
+      FROM card_ledger_entries WHERE card_id=? AND entry_type='purchase' AND occurred_at>=? AND occurred_at<?
+      GROUP BY month ORDER BY month
+    ''', [cardId, start, end]);
+    final values = <int, double>{for (final row in rows) (row['month'] as num).toInt(): (row['total'] as num).toDouble()};
+    return List.generate(12, (index) => {'label': 'M${index + 1}', 'total': values[index + 1] ?? 0});
+  }
+
+  /// Link accepted SMS/notification transactions when their text includes a
+  /// user-supplied card last four digits. Bill-payment wording becomes a
+  /// settlement entry, avoiding duplicate expense counting.
+  Future<void> autoLinkCardTransactions() async {
+    final cards = await paymentCards();
+    final db = await database;
+    for (final card in cards) {
+      if (card.id == null || card.lastFour.length != 4) continue;
+      final rows = await db.query('transactions', where: "review_status='accepted' AND (raw_message LIKE ? OR payment_method LIKE ? OR account_hint LIKE ?)", whereArgs: ['%${card.lastFour}%', '%${card.lastFour}%', '%${card.lastFour}%']);
+      for (final row in rows) {
+        final tx = TxRecord.fromMap(row);
+        final text = '${tx.rawMessage} ${tx.paymentMethod} ${tx.merchant}'.toLowerCase();
+        final isBillPayment = RegExp(r'credit\s*card\s*bill|card\s*bill\s*payment|cc\s*payment|card\s*payment').hasMatch(text);
+        final type = isBillPayment ? 'payment' : 'purchase';
+        await addCardLedgerEntry(cardId: card.id!, transactionId: tx.id, entryType: type, amount: tx.amount, occurredAt: tx.occurredAt, merchant: tx.merchant, note: isBillPayment ? 'Auto-linked bill payment' : 'Auto-linked card transaction');
+      }
+    }
   }
 
   Future<List<TxRecord>> reviewTransactions() async {
@@ -665,6 +791,29 @@ class AppDb {
     final db = await database;
     final rows = await db.rawQuery('SELECT type,COALESCE(SUM(amount),0) total FROM transactions WHERE review_status=\'accepted\' AND occurred_at>=? AND occurred_at<? GROUP BY type', [startMs, endMs]);
     return {for (final row in rows) row['type'] as String: (row['total'] as num).toDouble()};
+  }
+
+  /// Expense totals distributed across a requested number of visual buckets.
+  /// It is deliberately based on the selected date range, so charts change
+  /// whenever the user changes a home/report filter.
+  Future<List<double>> expenseTrendForPeriod(int startMs, int endMs, {int buckets = 7}) async {
+    final safeBuckets = math.max(1, buckets);
+    final duration = math.max(1, endMs - startMs);
+    final totals = List<double>.filled(safeBuckets, 0);
+    final db = await database;
+    final rows = await db.query(
+      'transactions',
+      columns: ['amount', 'occurred_at'],
+      where: "review_status='accepted' AND type='expense' AND occurred_at>=? AND occurred_at<?",
+      whereArgs: [startMs, endMs],
+    );
+    for (final row in rows) {
+      final at = (row['occurred_at'] as num).toInt();
+      final ratio = (at - startMs) / duration;
+      final index = (ratio * safeBuckets).floor().clamp(0, safeBuckets - 1).toInt();
+      totals[index] += (row['amount'] as num).toDouble();
+    }
+    return totals;
   }
 
   Future<Map<String, double>> expenseByCategoryForPeriod(int startMs, int endMs) async {

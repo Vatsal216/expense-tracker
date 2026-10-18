@@ -5,11 +5,15 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.provider.Telephony
+import android.util.Base64
 import android.view.WindowManager
+import java.io.ByteArrayOutputStream
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -249,6 +253,24 @@ class MainActivity : FlutterFragmentActivity() {
         else -> fallback
     }
 
+    // The package manager owns the real installed app icon. Passing a small PNG
+    // to Flutter avoids shipping or pretending to own PhonePe/GPay brand assets.
+    private fun appIconBase64(packageName: String): String {
+        return try {
+            val drawable = packageManager.getApplicationIcon(packageName)
+            val width = 96
+            val bitmap = Bitmap.createBitmap(width, width, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            drawable.setBounds(0, 0, width, width)
+            drawable.draw(canvas)
+            val output = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+            Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     private fun getUpiApps(args: Map<*, *>?, result: MethodChannel.Result) {
         val paymentUri = args?.get("paymentUri")?.toString()?.trim().orEmpty()
         val uri = if (paymentUri.isBlank()) null else validatedUpiUri(paymentUri)
@@ -274,6 +296,7 @@ class MainActivity : FlutterFragmentActivity() {
                     "packageName" to pkg,
                     "name" to friendlyUpiName(pkg, systemLabel),
                     "known" to knownOrder.containsKey(pkg),
+                    "iconBase64" to appIconBase64(pkg),
                 )
             } catch (_: Exception) {
                 null
