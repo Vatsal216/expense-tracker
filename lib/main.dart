@@ -4331,7 +4331,6 @@ class BudgetCard extends StatelessWidget {
             ],
           ),
         );
-    );
   }
 }
 
