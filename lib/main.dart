@@ -7,6 +7,7 @@ import 'models.dart';
 import 'native_bridge.dart';
 import 'enhancements.dart';
 import 'financial_ai.dart';
+import 'fintech_design.dart';
 
 const txTypes = ['expense', 'investment', 'income', 'transfer', 'refund'];
 final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
@@ -86,45 +87,7 @@ Future<void> _initializeServices() async {
 class ExpenseTrackerApp extends StatelessWidget {
   const ExpenseTrackerApp({super.key});
 
-  ThemeData _theme(Brightness brightness) {
-    const seed = Color(0xFF0C9A62);
-    final dark = brightness == Brightness.dark;
-    final scheme = ColorScheme.fromSeed(seedColor: seed, brightness: brightness);
-    final bg = dark ? const Color(0xFF101613) : const Color(0xFFF4F7F5);
-    final surface = dark ? const Color(0xFF18211C) : Colors.white;
-    final border = dark ? const Color(0xFF34423A) : const Color(0xFFE2E9E5);
-    final muted = dark ? const Color(0xFFB3BEB7) : const Color(0xFF66736B);
-    return ThemeData(
-      useMaterial3: true,
-      brightness: brightness,
-      colorScheme: scheme,
-      scaffoldBackgroundColor: bg,
-      splashFactory: InkSparkle.splashFactory,
-      appBarTheme: AppBarTheme(backgroundColor: bg, surfaceTintColor: Colors.transparent, elevation: 0, centerTitle: false),
-      cardTheme: CardThemeData(color: surface, surfaceTintColor: Colors.transparent, elevation: 0, margin: EdgeInsets.zero, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22))),
-      navigationBarTheme: NavigationBarThemeData(
-        height: 72,
-        backgroundColor: surface,
-        elevation: 4,
-        indicatorColor: dark ? const Color(0xFF174A35) : const Color(0xFFE0F5E9),
-        indicatorShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        labelTextStyle: WidgetStateProperty.resolveWith((states) => TextStyle(fontSize: 11, fontWeight: states.contains(WidgetState.selected) ? FontWeight.w800 : FontWeight.w600, color: states.contains(WidgetState.selected) ? scheme.primary : muted)),
-        iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(size: 23, color: states.contains(WidgetState.selected) ? scheme.primary : muted)),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        filled: true,
-        fillColor: surface,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: border)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide(color: scheme.primary, width: 1.7)),
-      ),
-      filledButtonTheme: FilledButtonThemeData(style: FilledButton.styleFrom(minimumSize: const Size(0, 52), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), textStyle: const TextStyle(fontWeight: FontWeight.w800))),
-      outlinedButtonTheme: OutlinedButtonThemeData(style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52), side: BorderSide(color: border), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), textStyle: const TextStyle(fontWeight: FontWeight.w800))),
-      chipTheme: ChipThemeData(backgroundColor: surface, selectedColor: dark ? const Color(0xFF174A35) : const Color(0xFFE0F5E9), side: BorderSide(color: border), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)), labelStyle: const TextStyle(fontWeight: FontWeight.w700)),
-      dividerTheme: DividerThemeData(color: border, thickness: 1, space: 1),
-    );
-  }
+  ThemeData _theme(Brightness brightness) => FintechDesign.theme(brightness);
 
   @override
   Widget build(BuildContext context) {
@@ -402,7 +365,7 @@ class _HomePageState extends State<HomePage> {
               ),
               const SizedBox(height: 18),
               SizedBox(
-                height: 42,
+                height: 50,
                 child: ListView(
                   scrollDirection: Axis.horizontal,
                   children: [
@@ -452,13 +415,11 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 22),
               const SectionHeader(title: 'Quick actions', subtitle: 'Common things, one tap away'),
               const SizedBox(height: 12),
-              Row(
+              FintechBentoGrid(
                 children: [
-                  Expanded(child: QuickActionCard(icon: Icons.qr_code_2_rounded, label: 'Pay UPI', caption: 'Scan or enter', onTap: () => widget.onNavigate(2))),
-                  const SizedBox(width: 10),
-                  Expanded(child: QuickActionCard(icon: Icons.add_rounded, label: 'Add', caption: 'Manual entry', onTap: () async { await showAddTransaction(context); widget.onChanged(); })),
-                  const SizedBox(width: 10),
-                  Expanded(child: QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Budget', caption: 'Set limits', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); widget.onChanged(); })),
+                  QuickActionCard(icon: Icons.qr_code_2_rounded, label: 'Pay by UPI', caption: 'Scan a QR or enter details', onTap: () => widget.onNavigate(2)),
+                  QuickActionCard(icon: Icons.add_rounded, label: 'Add transaction', caption: 'Record cash or an adjustment', onTap: () async { await showAddTransaction(context); widget.onChanged(); }),
+                  QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Manage budgets', caption: 'Set a spending limit', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); widget.onChanged(); }),
                 ],
               ),
               const SizedBox(height: 24),
@@ -501,22 +462,13 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _periodChip(String value, String label, IconData icon) {
-    final selected = period == value;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: ChoiceChip(
-        avatar: Icon(icon, size: 17, color: selected ? const Color(0xFF087849) : null),
-        label: Text(label),
-        selected: selected,
-        showCheckmark: false,
-        onSelected: (_) => _selectPeriod(value),
-        selectedColor: const Color(0xFFDDF5E9),
-        backgroundColor: Theme.of(context).cardColor,
-        labelStyle: TextStyle(
-          color: selected ? const Color(0xFF087849) : Theme.of(context).colorScheme.onSurfaceVariant,
-          fontWeight: FontWeight.w800,
-        ),
-        side: BorderSide(color: selected ? const Color(0xFFB7E5CD) : Theme.of(context).dividerColor),
+      padding: const EdgeInsets.only(right: FintechSpace.xs),
+      child: FintechFilterPill(
+        label: label,
+        icon: icon,
+        selected: period == value,
+        onTap: () => _selectPeriod(value),
       ),
     );
   }
@@ -612,7 +564,7 @@ class _HomeRecurringPreview extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(FintechRadius.card),
               border: Border.all(color: Theme.of(context).dividerColor),
             ),
             child: const Row(
@@ -630,7 +582,7 @@ class _HomeRecurringPreview extends StatelessWidget {
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(FintechRadius.card),
               border: Border.all(color: Theme.of(context).dividerColor),
             ),
             child: const SizedBox(
@@ -647,7 +599,7 @@ class _HomeRecurringPreview extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(FintechRadius.card),
               border: Border.all(color: Theme.of(context).dividerColor),
             ),
             child: const Row(
@@ -1422,13 +1374,14 @@ class _MoneyMapPageState extends State<MoneyMapPage> {
               Text('See where your money is going without mixing spending and investing.', style: Theme.of(context).textTheme.bodyMedium),
               const SizedBox(height: 14),
               Wrap(
-                spacing: 8,
+                spacing: FintechSpace.xs,
+                runSpacing: FintechSpace.xs,
                 children: [
-                  ChoiceChip(label: const Text('Week'), selected: period == 'week', onSelected: (_) => _select('week')),
-                  ChoiceChip(label: const Text('Month'), selected: period == 'month', onSelected: (_) => _select('month')),
-                  ChoiceChip(label: const Text('Day'), selected: period == 'day', onSelected: (_) => _select('day')),
-                  ChoiceChip(label: const Text('Total'), selected: period == 'total', onSelected: (_) => _select('total')),
-                  ChoiceChip(label: const Text('Custom'), selected: period == 'custom', onSelected: (_) => _select('custom')),
+                  FintechFilterPill(label: 'Week', icon: Icons.date_range_rounded, selected: period == 'week', onTap: () => _select('week')),
+                  FintechFilterPill(label: 'Month', icon: Icons.calendar_month_rounded, selected: period == 'month', onTap: () => _select('month')),
+                  FintechFilterPill(label: 'Day', icon: Icons.today_rounded, selected: period == 'day', onTap: () => _select('day')),
+                  FintechFilterPill(label: 'Total', icon: Icons.all_inclusive_rounded, selected: period == 'total', onTap: () => _select('total')),
+                  FintechFilterPill(label: 'Custom', icon: Icons.tune_rounded, selected: period == 'custom', onTap: () => _select('custom')),
                 ],
               ),
               const SizedBox(height: 6),
@@ -2020,7 +1973,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
           ),
         ),
         SizedBox(
-          height: 46,
+          height: 52,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -2029,22 +1982,10 @@ class _TransactionsPageState extends State<TransactionsPage> {
                   final selected = filter == t;
                   return Padding(
                     padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: Text(titleCase(t)),
+                    child: FintechFilterPill(
+                      label: titleCase(t),
                       selected: selected,
-                      onSelected: (_) => setState(() => filter = t),
-                      showCheckmark: true,
-                      checkmarkColor: const Color(0xFF087849),
-                      selectedColor: const Color(0xFFDDF5E9),
-                      backgroundColor: Colors.white,
-                      labelStyle: TextStyle(
-                        color: selected ? const Color(0xFF087849) : const Color(0xFF3F4A43),
-                        fontWeight: FontWeight.w800,
-                      ),
-                      side: BorderSide(
-                        color: selected ? const Color(0xFFB7E5CD) : const Color(0xFFD7DFDA),
-                      ),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      onTap: () => setState(() => filter = t),
                     ),
                   );
                 })
@@ -3255,59 +3196,20 @@ class _ReportsPageState extends State<ReportsPage> {
               ],
             ),
             const SizedBox(height: 18),
-            Row(
+            FintechBentoGrid(
               children: [
-                Expanded(child: MetricCard(title: 'Expense', value: money.format(totalExpense), icon: Icons.south_east_rounded, onTap: () => _openTransactions('Expenses • $periodLabel', type: 'expense'))),
-                const SizedBox(width: 10),
-                Expanded(child: MetricCard(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west_rounded, onTap: () => _openTransactions('Income • $periodLabel', type: 'income'))),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(child: MetricCard(title: 'Investment', value: money.format(types['investment'] ?? 0), icon: Icons.show_chart_rounded, onTap: () => _openTransactions('Investments • $periodLabel', type: 'investment'))),
-                const SizedBox(width: 10),
-                Expanded(child: MetricCard(title: 'Refund', value: money.format(types['refund'] ?? 0), icon: Icons.replay_rounded, onTap: () => _openTransactions('Refunds • $periodLabel', type: 'refund'))),
+                MetricCard(title: 'Expense', value: money.format(totalExpense), icon: Icons.south_east_rounded, onTap: () => _openTransactions('Expenses • $periodLabel', type: 'expense')),
+                MetricCard(title: 'Income', value: money.format(types['income'] ?? 0), icon: Icons.south_west_rounded, onTap: () => _openTransactions('Income • $periodLabel', type: 'income')),
+                MetricCard(title: 'Investment', value: money.format(types['investment'] ?? 0), icon: Icons.show_chart_rounded, onTap: () => _openTransactions('Investments • $periodLabel', type: 'investment')),
+                MetricCard(title: 'Refund', value: money.format(types['refund'] ?? 0), icon: Icons.replay_rounded, onTap: () => _openTransactions('Refunds • $periodLabel', type: 'refund')),
               ],
             ),
             const SizedBox(height: 22),
             const SectionHeader(title: 'Where your money went', subtitle: 'Largest spending signals for the selected period'),
             const SizedBox(height: 12),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final categoryCard = _InsightCard(
-                  title: 'Top category',
-                  value: topCategory?.key ?? 'No data',
-                  amount: topCategory == null ? '—' : money.format(topCategory.value),
-                  icon: Icons.category_outlined,
-                  onTap: topCategory == null ? null : () => _openTransactions('${topCategory!.key} • $periodLabel', type: 'expense', category: topCategory!.key),
-                );
-                final merchantCard = _InsightCard(
-                  title: 'Top merchant',
-                  value: topMerchant?.key ?? 'No data',
-                  amount: topMerchant == null ? '—' : money.format(topMerchant.value),
-                  icon: Icons.storefront_outlined,
-                  onTap: topMerchant == null ? null : () => _openTransactions('${topMerchant!.key} • $periodLabel', type: 'expense', merchant: topMerchant!.key),
-                );
-                if (constraints.maxWidth < 520) {
-                  return Column(
-                    children: [
-                      categoryCard,
-                      const SizedBox(height: 10),
-                      merchantCard,
-                    ],
-                  );
-                }
-                return Row(
-                  children: [
-                    Expanded(child: categoryCard),
-                    const SizedBox(width: 10),
-                    Expanded(child: merchantCard),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 10),
+            // Category and merchant rankings are displayed once in their detailed
+            // sections below. Keeping only the single-transaction highlight avoids
+            // repeating the same credit-card provider on three large cards.
             _InsightCard(
               title: 'Largest single expense',
               value: largest?.merchant ?? 'No expense found',
@@ -3475,7 +3377,7 @@ class _InsightCard extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
               color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(22),
+              borderRadius: BorderRadius.circular(FintechRadius.card),
               border: Border.all(color: Theme.of(context).dividerColor),
             ),
             child: Column(
@@ -4208,30 +4110,25 @@ class QuickActionCard extends StatelessWidget {
   const QuickActionCard({super.key, required this.icon, required this.label, required this.caption, required this.onTap});
 
   @override
-  Widget build(BuildContext context) => Material(
-        color: Theme.of(context).cardColor,
-        borderRadius: BorderRadius.circular(20),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 15),
-            decoration: BoxDecoration(borderRadius: BorderRadius.circular(20), border: Border.all(color: Theme.of(context).dividerColor)),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(color: const Color(0xFFE7F6EE), borderRadius: BorderRadius.circular(13)),
-                child: Icon(icon, color: const Color(0xFF0A8B56), size: 21),
-              ),
-              const SizedBox(height: 11),
-              Text(label, style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF1A261F))),
-              const SizedBox(height: 2),
-              Text(caption, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: Color(0xFF7F8A83))),
-            ]),
-          ),
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return FintechSurface(
+      onTap: onTap,
+      padding: const EdgeInsets.all(FintechSpace.md),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(
+          width: 44,
+          height: 44,
+          decoration: BoxDecoration(color: scheme.primaryContainer, borderRadius: BorderRadius.circular(15)),
+          child: Icon(icon, color: scheme.onPrimaryContainer, size: 22),
         ),
-      );
+        const SizedBox(height: FintechSpace.sm),
+        Text(label, style: TextStyle(fontWeight: FontWeight.w900, color: scheme.onSurface)),
+        const SizedBox(height: FintechSpace.xxs),
+        Text(caption, maxLines: 2, overflow: TextOverflow.ellipsis, style: Theme.of(context).textTheme.bodySmall),
+      ]),
+    );
+  }
 }
 
 class MetricCard extends StatelessWidget {
@@ -4242,43 +4139,33 @@ class MetricCard extends StatelessWidget {
   const MetricCard({super.key, required this.title, required this.value, required this.icon, this.onTap});
 
   @override
-  Widget build(BuildContext context) => Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(22),
-          child: Container(
-            padding: const EdgeInsets.all(17),
-            decoration: BoxDecoration(
-              color: Theme.of(context).cardColor,
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(color: Theme.of(context).dividerColor),
-              boxShadow: const [BoxShadow(color: Color(0x0B000000), blurRadius: 14, offset: Offset(0, 6))],
-            ),
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return FintechSurface(
+            onTap: onTap,
             child: Row(
               children: [
                 Container(
                   width: 42,
                   height: 42,
-                  decoration: BoxDecoration(color: const Color(0xFFE8F7EF), borderRadius: BorderRadius.circular(14)),
-                  child: Icon(icon, color: const Color(0xFF0A8B56), size: 22),
+                  decoration: BoxDecoration(color: scheme.secondaryContainer, borderRadius: BorderRadius.circular(14)),
+                  child: Icon(icon, color: scheme.onSecondaryContainer, size: 22),
                 ),
                 const SizedBox(width: 12),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(title, style: const TextStyle(color: Color(0xFF7A877F), fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  Text(title, style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700)),
                   const SizedBox(height: 3),
                   FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.centerLeft,
-                    child: Text(value, maxLines: 1, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Color(0xFF18241D))),
+                    child: Text(value, maxLines: 1, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: Theme.of(context).colorScheme.onSurface)),
                   ),
                 ])),
                 if (onTap != null) const Padding(padding: EdgeInsets.only(left: 6), child: Icon(Icons.chevron_right_rounded, size: 18)),
               ],
             ),
-          ),
-        ),
-      );
+          );
+  }
 }
 
 class TransactionTile extends StatelessWidget {
@@ -4288,22 +4175,23 @@ class TransactionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final positive = tx.type == 'income' || tx.type == 'refund';
-    final amountColor = positive ? const Color(0xFF087D4A) : const Color(0xFF26312A);
+    final amountColor = positive ? scheme.primary : scheme.onSurface;
     final typeColor = _transactionTypeColor(tx.type);
     final sign = positive ? '+' : '-';
 
     return Material(
-      color: Theme.of(context).cardColor,
-      borderRadius: BorderRadius.circular(21),
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(FintechRadius.card),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(21),
+        borderRadius: BorderRadius.circular(FintechRadius.card),
         child: Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(21),
-            border: Border.all(color: Theme.of(context).dividerColor),
+            borderRadius: BorderRadius.circular(FintechRadius.card),
+            border: Border.all(color: scheme.outline.withValues(alpha: .72)),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
@@ -4318,7 +4206,7 @@ class TransactionTile extends StatelessWidget {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Row(children: [
-                    Expanded(child: Text(tx.merchant, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900))),
+                    Expanded(child: Text(tx.merchant, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900, color: scheme.onSurface))),
                     const SizedBox(width: 8),
                     Text('$sign${money.format(tx.amount)}', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900, color: amountColor)),
                   ]),
@@ -4330,11 +4218,11 @@ class TransactionTile extends StatelessWidget {
                       child: Text(tx.category, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: typeColor, fontWeight: FontWeight.w800)),
                     ),
                     const SizedBox(width: 7),
-                    Expanded(child: Text(dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)), maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: Color(0xFF879189)))),
+                    Expanded(child: Text(dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant))),
                   ]),
                   if (tx.note.trim().isNotEmpty) ...[
                     const SizedBox(height: 5),
-                    Text(tx.note, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: Color(0xFF657169), fontStyle: FontStyle.italic)),
+                    Text(tx.note, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant, fontStyle: FontStyle.italic)),
                   ],
                   if (tx.source == 'sms' || tx.source == 'phonepe_notification') ...[
                     const SizedBox(height: 5),
@@ -4374,18 +4262,17 @@ class EmptyCard extends StatelessWidget {
   const EmptyCard({super.key, required this.text});
 
   @override
-  Widget build(BuildContext context) => Container(
+  Widget build(BuildContext context) => FintechSurface(
         padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 28),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24), border: Border.all(color: const Color(0xFFE5EBE7))),
         child: Column(children: [
           Container(
             width: 54,
             height: 54,
-            decoration: BoxDecoration(color: const Color(0xFFEAF7F0), borderRadius: BorderRadius.circular(18)),
-            child: const Icon(Icons.receipt_long_outlined, color: Color(0xFF0A8B56), size: 26),
+            decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer, borderRadius: BorderRadius.circular(18)),
+            child: Icon(Icons.receipt_long_outlined, color: Theme.of(context).colorScheme.onPrimaryContainer, size: 26),
           ),
           const SizedBox(height: 13),
-          Text(text, textAlign: TextAlign.center, style: const TextStyle(color: Color(0xFF6F7B73), height: 1.4, fontWeight: FontWeight.w500)),
+          Text(text, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.4, fontWeight: FontWeight.w600)),
         ]),
       );
 }
@@ -4396,22 +4283,16 @@ class SettingsBox extends StatelessWidget {
   const SettingsBox({super.key, required this.title, required this.children});
 
   @override
-  Widget build(BuildContext context) => Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(color: const Color(0xFFE4EBE7)),
-          boxShadow: const [BoxShadow(color: Color(0x08000000), blurRadius: 14, offset: Offset(0, 5))],
-        ),
+  Widget build(BuildContext context) => FintechSurface(
+        padding: EdgeInsets.zero,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Container(
               width: double.infinity,
               padding: const EdgeInsets.fromLTRB(17, 14, 17, 11),
-              color: const Color(0xFFF7FAF8),
-              child: Text(title.toUpperCase(), style: const TextStyle(fontSize: 11.5, letterSpacing: .8, color: Color(0xFF6C7A71), fontWeight: FontWeight.w900)),
+              color: Theme.of(context).colorScheme.surfaceContainerLow,
+              child: Text(title.toUpperCase(), style: TextStyle(fontSize: 11.5, letterSpacing: .8, color: Theme.of(context).colorScheme.onSurfaceVariant, fontWeight: FontWeight.w900)),
             ),
             ...children,
           ],
@@ -4431,31 +4312,25 @@ class BudgetCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final progress = budget <= 0 ? 0.0 : (spent / budget).clamp(0.0, 1.0).toDouble();
     final remaining = (budget - spent).clamp(0, double.infinity).toDouble();
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(22),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(22),
-        child: Container(
+    final scheme = Theme.of(context).colorScheme;
+    return FintechSurface(
+          onTap: onTap,
           padding: const EdgeInsets.all(17),
-          decoration: BoxDecoration(borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFE4EBE7))),
           child: Column(
             children: [
               Row(children: [
-                Container(width: 40, height: 40, decoration: BoxDecoration(color: const Color(0xFFE8F7EF), borderRadius: BorderRadius.circular(13)), child: const Icon(Icons.account_balance_wallet_outlined, color: Color(0xFF0A8B56), size: 21)),
+                Container(width: 40, height: 40, decoration: BoxDecoration(color: scheme.primaryContainer, borderRadius: BorderRadius.circular(13)), child: Icon(Icons.account_balance_wallet_outlined, color: scheme.onPrimaryContainer, size: 21)),
                 const SizedBox(width: 11),
-                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontWeight: FontWeight.w900, color: Color(0xFF1B2720))), const SizedBox(height: 2), Text('${money.format(remaining)} remaining', style: const TextStyle(fontSize: 11.5, color: Color(0xFF7C8880)))])),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: TextStyle(fontWeight: FontWeight.w900, color: scheme.onSurface)), const SizedBox(height: 2), Text('${money.format(remaining)} remaining', style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant))])),
                 if (onDelete != null) IconButton(onPressed: onDelete, icon: const Icon(Icons.delete_outline_rounded, size: 20)),
               ]),
               const SizedBox(height: 13),
-              Row(children: [Text('${money.format(spent)} spent', style: const TextStyle(fontWeight: FontWeight.w700)), const Spacer(), Text('${(progress * 100).round()}%', style: const TextStyle(color: Color(0xFF0A8B56), fontWeight: FontWeight.w900))]),
+              Row(children: [Text('${money.format(spent)} spent', style: const TextStyle(fontWeight: FontWeight.w700)), const Spacer(), Text('${(progress * 100).round()}%', style: TextStyle(color: scheme.primary, fontWeight: FontWeight.w900))]),
               const SizedBox(height: 8),
-              ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: progress, minHeight: 8, backgroundColor: const Color(0xFFE9EFEB))),
+              ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: progress, minHeight: 8, backgroundColor: scheme.surfaceContainerHighest)),
             ],
           ),
-        ),
-      ),
+        );
     );
   }
 }
