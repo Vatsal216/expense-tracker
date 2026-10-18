@@ -55,6 +55,31 @@ object TransactionParser {
         )
     }
 
+    /**
+     * Gmail content is classified by the exact same hybrid classifier and user
+     * rules as SMS.  The email text is deliberately not persisted: it is only
+     * used in-memory to create a privacy-safe ledger record.
+     */
+    fun parseGmail(db: ExpenseDatabase, messageId: String, sender: String, subject: String, body: String, occurredAt: Long): ParsedTransaction? {
+        val text = "$subject | $body".replace(Regex("\\s+"), " ").trim()
+        if (text.isBlank() || Regex("(?i)\\b(otp|one.time.password|verification code|unsubscribe|cashback offer)\\b").containsMatchIn(text)) return null
+        val amount = extractAmount(text) ?: return null
+        val lower = text.lowercase(Locale.ROOT)
+        if (!Regex("(?i)\\b(debited|spent|payment successful|transaction successful|paid|credited|refund|reversed)\\b").containsMatchIn(text)) return null
+        val rule = db.findRule(text)
+        val decision = classify(db, text, rule)
+        if (decision.label == "ignore" || decision.label == "pending") return null
+        val category = categoryFor(decision.label, lower, rule)
+        val cardPayment = decision.label == "transfer" && isCreditCardBillPayment(lower)
+        val merchant = if (cardPayment) extractCreditCardMerchant(text) ?: "Credit Card Payment" else rule?.merchant ?: extractMerchant(text) ?: sender.ifBlank { "Email payment" }
+        val upiReference = upiRefRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
+        val accountHint = accountRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
+        val method = when { cardPayment -> "Bank → Credit Card"; lower.contains("upi") -> "UPI"; lower.contains("card") -> "Card"; else -> "Bank" }
+        return ParsedTransaction(amount, decision.label, category, merchant, extractNote(text), "", sender, method, accountHint, upiReference,
+            occurredAt, fingerprint("gmail|$messageId"), decision.method, decision.confidence,
+            if (decision.method == "low_confidence_review") "needs_review" else "accepted")
+    }
+
     fun parsePhonePeNotification(db: ExpenseDatabase, title: String, body: String, occurredAt: Long, appName: String = "PhonePe"): ParsedTransaction? {
         val text = listOf(title, body).filter { it.isNotBlank() }.joinToString(" | ").trim()
         if (text.isBlank()) return null

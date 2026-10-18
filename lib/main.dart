@@ -8,6 +8,7 @@ import 'native_bridge.dart';
 import 'enhancements.dart';
 import 'financial_ai.dart';
 import 'financial_ai_agent.dart';
+import 'gmail_expense_service.dart';
 import 'fintech_design.dart';
 import 'cards_page.dart';
 
@@ -69,10 +70,20 @@ Future<void> _initializeServices() async {
         debugPrint('Startup task $label failed: $e');
       }
     }
+    // Native sources attach evidence immediately; this safely backfills the
+    // visible ledger created by older app versions.
+    await safeTask('transaction evidence backfill', () => AppDb.instance.backfillTransactionEvidence());
     await safeTask('daily summary', () => NativeBridge.scheduleDailySummary(enabled: enabled, hour: hour, minute: minute));
     await safeTask('preferences', () => loadEnhancedPreferences());
     await safeTask('merchant normalization', () => AppDb.instance.normalizeExistingMerchants());
     await safeTask('account sync', () => AppDb.instance.syncAccountsFromTransactions());
+    final gmailSyncEnabled = await AppDb.instance.getBoolSetting('gmail_sync_enabled', fallback: false);
+    if (gmailSyncEnabled) {
+      await safeTask('gmail refresh', () async {
+        await GmailExpenseService().syncSilently();
+        expenseDataRevision.value++;
+      });
+    }
     await safeTask('transfer matching', () async { await AppDb.instance.matchTransfers(); });
     await safeTask('deduplication', () async {
       final dedupResult = await AppDb.instance.smartDeduplicate();
@@ -92,19 +103,13 @@ class ExpenseTrackerApp extends StatelessWidget {
   ThemeData _theme(Brightness brightness) => FintechDesign.theme(brightness);
 
   @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: expenseThemeMode,
-      builder: (context, mode, _) => MaterialApp(
+  Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
         title: 'Expense Tracker',
         theme: _theme(Brightness.light),
-        darkTheme: _theme(Brightness.dark),
-        themeMode: mode,
+        themeMode: ThemeMode.light,
         home: const AppLockGate(child: HomeShell()),
-      ),
-    );
-  }
+      );
 }
 
 class HomeShell extends StatefulWidget {
@@ -123,16 +128,44 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
   void navigateTo(int value) => setState(() => index = value);
 
+  Future<void> _openMore(BuildContext context) async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 18),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const ListTile(title: Text('More'), subtitle: Text('Plans, reports, advisor and settings')),
+            ListTile(leading: const Icon(Icons.savings_outlined), title: const Text('Plan & recurring'), onTap: () => Navigator.pop(sheetContext, 4)),
+            ListTile(leading: const Icon(Icons.insights_rounded), title: const Text('Reports'), onTap: () => Navigator.pop(sheetContext, 5)),
+            ListTile(leading: const Icon(Icons.auto_awesome_rounded), title: const Text('AI Advisor'), subtitle: const Text('Ask about spending, UPI, cards and budgets'), onTap: () => Navigator.pop(sheetContext, 7)),
+            ListTile(leading: const Icon(Icons.settings_rounded), title: const Text('Settings'), onTap: () => Navigator.pop(sheetContext, 6)),
+          ]),
+        ),
+      ),
+    );
+    if (!mounted || selected == null) return;
+    if (selected == 7) {
+      await Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorPage()));
+      refresh();
+    } else {
+      navigateTo(selected);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     expenseDataRevision.addListener(refresh);
+    ledgerDataRevision.addListener(refresh);
   }
 
   @override
   void dispose() {
     expenseDataRevision.removeListener(refresh);
+    ledgerDataRevision.removeListener(refresh);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -164,17 +197,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             boxShadow: [BoxShadow(color: Color(0x14000000), blurRadius: 22, offset: Offset(0, -5))],
           ),
           child: NavigationBar(
-            selectedIndex: index,
-            onDestinationSelected: navigateTo,
+            selectedIndex: index > 3 ? 4 : index,
+            onDestinationSelected: (value) {
+              if (value == 4) { _openMore(context); } else { navigateTo(value); }
+            },
             labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
             destinations: const [
               NavigationDestination(icon: Icon(Icons.home_rounded), label: 'Home'),
               NavigationDestination(icon: Icon(Icons.receipt_long_rounded), label: 'Activity'),
               NavigationDestination(icon: Icon(Icons.qr_code_2_rounded), label: 'Pay'),
               NavigationDestination(icon: Icon(Icons.credit_card_rounded), label: 'Cards'),
-              NavigationDestination(icon: Icon(Icons.savings_outlined), selectedIcon: Icon(Icons.savings_rounded), label: 'Plan'),
-              NavigationDestination(icon: Icon(Icons.insights_rounded), label: 'Reports'),
-              NavigationDestination(icon: Icon(Icons.settings_rounded), label: 'Settings'),
+              NavigationDestination(icon: Icon(Icons.grid_view_rounded), selectedIcon: Icon(Icons.grid_view_rounded), label: 'More'),
             ],
           ),
         ),
@@ -382,7 +415,7 @@ class _HomePageState extends State<HomePage> {
               const SizedBox(height: 18),
               Align(alignment: Alignment.centerLeft, child: _periodMenu()),
               const SizedBox(height: 16),
-              _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress, trend: trend),
+              _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress, trend: trend, trendLabels: _trendLabels(selectedRange)),
               const SizedBox(height: 22),
               const SizedBox(height: 24),
               SectionHeader(
@@ -452,6 +485,7 @@ class _HomePageState extends State<HomePage> {
     required double remaining,
     required double progress,
     required List<double> trend,
+    required List<String> trendLabels,
   }) {
     final monthlyBudgetMode = period == 'month';
     return Container(
@@ -495,25 +529,43 @@ class _HomePageState extends State<HomePage> {
             ),
           ],
           const SizedBox(height: 22),
-          _WeeklySparkBars(values: trend, period: period),
+          _WeeklySparkBars(values: trend, labels: trendLabels),
         ],
       ),
     );
+  }
+
+  List<String> _trendLabels((int, int) range) {
+    final start = DateTime.fromMillisecondsSinceEpoch(range.$1);
+    final end = DateTime.fromMillisecondsSinceEpoch(range.$2).subtract(const Duration(days: 1));
+    if (period == 'day') return const ['12am', '4am', '8am', '12pm', '4pm', '8pm', 'Now'];
+    if (period == 'week') return List.generate(7, (index) => DateFormat('EEE').format(start.add(Duration(days: index))));
+    if (period == 'month') {
+      final days = end.day;
+      return List.generate(7, (index) {
+        final from = 1 + (days * index ~/ 7);
+        final to = (days * (index + 1) ~/ 7).clamp(from, days);
+        return '$from–$to';
+      });
+    }
+    if (period == 'total' && start.year == 1970) return const ['Earlier', '', '', '', '', '', 'Now'];
+    final span = end.difference(start).inDays.clamp(0, 36500).toInt();
+    return List.generate(7, (index) {
+      final point = start.add(Duration(days: (span * index / 6).round()));
+      return span > 90 ? DateFormat('MMM').format(point) : DateFormat('d MMM').format(point);
+    });
   }
 
 }
 
 class _WeeklySparkBars extends StatelessWidget {
   final List<double> values;
-  final String period;
-  const _WeeklySparkBars({required this.values, required this.period});
+  final List<String> labels;
+  const _WeeklySparkBars({required this.values, required this.labels});
 
   @override
   Widget build(BuildContext context) {
     final maximum = values.fold<double>(0, (maxValue, item) => item > maxValue ? item : maxValue);
-    final labels = period == 'week'
-        ? const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-        : const ['1', '2', '3', '4', '5', '6', '7'];
     return SizedBox(
       height: 70,
       child: Row(
@@ -3725,6 +3777,11 @@ class _SettingsPageState extends State<SettingsPage> {
   bool notificationPermission = false;
   bool summary = true;
   TimeOfDay summaryTime = const TimeOfDay(hour: 21, minute: 0);
+  bool gmailEnabled = false;
+  bool gmailSyncing = false;
+  String gmailEmail = '';
+  String gmailServerClientId = '';
+  String gmailStatus = 'Connect Gmail to import completed transaction receipts.';
 
   @override
   void initState() {
@@ -3755,6 +3812,11 @@ class _SettingsPageState extends State<SettingsPage> {
         hour: int.tryParse(await AppDb.instance.getSetting('daily_summary_hour', fallback: '21')) ?? 21,
         minute: int.tryParse(await AppDb.instance.getSetting('daily_summary_minute', fallback: '0')) ?? 0,
       );
+      gmailEnabled = await AppDb.instance.getBoolSetting('gmail_sync_enabled', fallback: false);
+      gmailEmail = await AppDb.instance.getSetting('gmail_connected_email');
+      gmailServerClientId = await AppDb.instance.getSetting('gmail_server_client_id');
+      final syncedAt = int.tryParse(await AppDb.instance.getSetting('gmail_last_sync_at'));
+      if (gmailEnabled) gmailStatus = syncedAt == null ? 'Connected${gmailEmail.isEmpty ? '' : ' as $gmailEmail'} · not synced yet' : 'Connected${gmailEmail.isEmpty ? '' : ' as $gmailEmail'} · last sync ${dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(syncedAt))}';
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -3875,6 +3937,30 @@ class _SettingsPageState extends State<SettingsPage> {
     await NativeBridge.scheduleDailySummary(enabled: summary, hour: summaryTime.hour, minute: summaryTime.minute);
   }
 
+  Future<void> _syncGmail({bool connect = false}) async {
+    setState(() => gmailSyncing = true);
+    try {
+      final result = connect ? await GmailExpenseService().connectAndSync() : await GmailExpenseService().syncSilently();
+      gmailEnabled = true;
+      gmailEmail = await AppDb.instance.getSetting('gmail_connected_email');
+      gmailStatus = 'Scanned ${result.scanned} emails · imported ${result.imported} · ignored/duplicates ${result.ignored}';
+      widget.onChanged();
+    } catch (e) { gmailStatus = 'Gmail sync needs reconnection: ${e.toString().replaceFirst('Exception: ', '')}'; }
+    finally { if (mounted) setState(() => gmailSyncing = false); }
+  }
+
+  Future<void> _disconnectGmail() async {
+    await GmailExpenseService().disconnect();
+    if (mounted) setState(() { gmailEnabled = false; gmailEmail = ''; gmailStatus = 'Gmail disconnected. Existing imported transactions are kept.'; });
+  }
+
+  Future<void> _editGmailClientId() async {
+    final controller = TextEditingController(text: gmailServerClientId);
+    final saved = await showDialog<bool>(context: context, builder: (context) => AlertDialog(title: const Text('Google OAuth client ID'), content: TextField(controller: controller, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(hintText: '…apps.googleusercontent.com', helperText: 'Optional if your Android OAuth client is already configured.')), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save'))]));
+    if (saved == true) { gmailServerClientId = controller.text.trim(); await AppDb.instance.setSetting('gmail_server_client_id', gmailServerClientId); if (mounted) setState(() {}); }
+    controller.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
@@ -3975,6 +4061,44 @@ class _SettingsPageState extends State<SettingsPage> {
                 subtitle: const Text('Enable Expense Tracker, then return and tap refresh.'),
                 trailing: TextButton(onPressed: NativeBridge.openNotificationAccessSettings, child: const Text('Open')),
               ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        SettingsBox(
+          title: 'Email expense tracking',
+          children: [
+            ListTile(
+              leading: const Icon(Icons.email_outlined),
+              title: Text(gmailEnabled ? 'Gmail connected${gmailEmail.isEmpty ? '' : ' · $gmailEmail'}' : 'Connect Gmail'),
+              subtitle: Text(gmailStatus),
+              trailing: gmailSyncing ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)) : FilledButton.tonal(onPressed: () => _syncGmail(connect: !gmailEnabled), child: Text(gmailEnabled ? 'Sync now' : 'Connect')),
+              onTap: gmailSyncing ? null : () => _syncGmail(connect: !gmailEnabled),
+            ),
+            const ListTile(
+              leading: Icon(Icons.privacy_tip_outlined),
+              title: Text('Read-only and deduplicated'),
+              subtitle: Text('Uses Google OAuth. Only completed finance emails are parsed; raw email bodies are not saved. Matching SMS/UPI transactions are not counted twice.'),
+            ),
+            ListTile(leading: const Icon(Icons.key_outlined), title: const Text('Google OAuth client ID'), subtitle: Text(gmailServerClientId.isEmpty ? 'Optional setup value · see GMAIL_SETUP.md' : 'Configured'), trailing: const Icon(Icons.chevron_right_rounded), onTap: _editGmailClientId),
+            if (gmailEnabled) ListTile(leading: const Icon(Icons.link_off_rounded), title: const Text('Disconnect Gmail'), subtitle: const Text('Stops future sync; does not delete existing transactions.'), onTap: _disconnectGmail),
+          ],
+        ),
+        const SizedBox(height: 14),
+        SettingsBox(
+          title: 'AI Advisor',
+          children: [
+            ListTile(
+              leading: const Icon(Icons.auto_awesome_rounded),
+              title: const Text('AI provider setup'),
+              subtitle: const Text('Configure Gemini, OpenAI, Claude or DeepSeek'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorSettingsPage())),
+            ),
+            const ListTile(
+              leading: Icon(Icons.lock_outline_rounded),
+              title: Text('Chat history stays on this device'),
+              subtitle: Text('Your API key uses secure storage. Finance summaries are sent only when you ask a question.'),
+            ),
           ],
         ),
         const SizedBox(height: 14),
@@ -4098,7 +4222,7 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             ListTile(
               leading: const Icon(Icons.fingerprint),
-              title: const Text('Biometric lock, secure preview & dark mode'),
+              title: const Text('Biometric lock & secure preview'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const PrivacyAppearancePage())),
             ),

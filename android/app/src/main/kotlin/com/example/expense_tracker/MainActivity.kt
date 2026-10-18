@@ -42,6 +42,7 @@ class MainActivity : FlutterFragmentActivity() {
                 "hasSmsHistoryPermission" -> result.success(hasSmsHistoryPermission())
                 "importHistoricalSms" -> importHistoricalSms(result)
                 "reclassifyStoredSms" -> reclassifyStoredSms(result)
+                "ingestGmailEmail" -> ingestGmailEmail(call.arguments as? Map<*, *>, result)
                 "requestNotificationPermission" -> requestNotificationPermission(result)
                 "hasNotificationPermission" -> result.success(hasNotificationPermission())
                 "hasNotificationListenerPermission" -> result.success(hasNotificationListenerPermission())
@@ -83,6 +84,18 @@ class MainActivity : FlutterFragmentActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    private fun ingestGmailEmail(args: Map<*, *>?, result: MethodChannel.Result) {
+        try {
+            val messageId = args?.get("messageId")?.toString().orEmpty()
+            val sender = args?.get("sender")?.toString().orEmpty()
+            val subject = args?.get("subject")?.toString().orEmpty()
+            val body = args?.get("body")?.toString().orEmpty()
+            val occurredAt = (args?.get("occurredAt") as? Number)?.toLong() ?: System.currentTimeMillis()
+            if (messageId.isBlank()) { result.error("invalid_email", "Missing Gmail message ID", null); return }
+            result.success(ExpenseDatabase(this).ingestGmailEmail(messageId, sender, subject, body, occurredAt))
+        } catch (e: Exception) { result.error("gmail_ingest_failed", e.message, null) }
     }
 
     private fun hasSmsPermission(): Boolean =

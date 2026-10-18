@@ -21,8 +21,10 @@ final _money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigi
 final _date = DateFormat('dd MMM yyyy, h:mm a');
 
 Future<void> loadEnhancedPreferences() async {
-  final dark = await AppDb.instance.getBoolSetting('dark_mode');
-  expenseThemeMode.value = dark ? ThemeMode.dark : ThemeMode.light;
+  // The product uses one light financial UI. Clear older saved dark-mode
+  // preferences so an upgrade can never reopen in a different theme.
+  expenseThemeMode.value = ThemeMode.light;
+  await AppDb.instance.setSetting('dark_mode', '0');
 
   // v15 QA/stability release: screenshots are deliberately enabled.
   // Clear any persisted v12-v14 secure-screen preference so an upgrade cannot
@@ -128,7 +130,7 @@ class EnhancementHubPage extends StatelessWidget {
       _HubItem('Recurring payments', 'You decide which payments are recurring. The app will not guess.', Icons.repeat_rounded, const RecurringPaymentsPage()),
       _HubItem('Receipt scanner', 'Scan or import a receipt and save the expense locally.', Icons.document_scanner_rounded, const ReceiptImportPage()),
       _HubItem('Export & backup', 'Export reports or create an encrypted local backup.', Icons.ios_share_rounded, const ExportBackupPage()),
-      _HubItem('Privacy & appearance', 'Biometric lock and dark mode. Screenshots remain enabled during QA.', Icons.security_rounded, const PrivacyAppearancePage()),
+      _HubItem('Privacy & appearance', 'Biometric lock and screenshot settings.', Icons.security_rounded, const PrivacyAppearancePage()),
     ];
     return Scaffold(
       appBar: AppBar(title: const Text('More tools')),
@@ -1275,7 +1277,6 @@ class PrivacyAppearancePage extends StatefulWidget {
 class _PrivacyAppearancePageState extends State<PrivacyAppearancePage> {
   bool loading = true;
   bool lock = false;
-  bool dark = false;
 
   @override
   void initState() {
@@ -1285,7 +1286,6 @@ class _PrivacyAppearancePageState extends State<PrivacyAppearancePage> {
 
   Future<void> _load() async {
     lock = await AppDb.instance.getBoolSetting('privacy_lock_enabled');
-    dark = await AppDb.instance.getBoolSetting('dark_mode');
     await AppDb.instance.setSetting('secure_screen_enabled', '0');
     try { await NativeBridge.setSecureScreen(false); } catch (_) {}
     if (mounted) setState(() => loading = false);
@@ -1293,9 +1293,6 @@ class _PrivacyAppearancePageState extends State<PrivacyAppearancePage> {
 
   Future<void> _set(String key, bool value) async {
     await AppDb.instance.setSetting(key, value ? '1' : '0');
-    if (key == 'dark_mode') {
-      expenseThemeMode.value = value ? ThemeMode.dark : ThemeMode.light;
-    }
   }
 
   @override
@@ -1313,12 +1310,6 @@ class _PrivacyAppearancePageState extends State<PrivacyAppearancePage> {
                     secondary: const Icon(Icons.fingerprint),
                     title: const Text('Biometric/device lock'),
                     subtitle: const Text('Require local authentication when opening the app.'),
-                  ),
-                  SwitchListTile(
-                    value: dark,
-                    onChanged: (v) { setState(() => dark = v); _set('dark_mode', v); },
-                    secondary: const Icon(Icons.dark_mode),
-                    title: const Text('Dark mode'),
                   ),
                   const ListTile(
                     leading: Icon(Icons.photo_camera_outlined),

@@ -1,7 +1,13 @@
 import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 import 'models.dart';
+
+/// Incremented after any user-visible ledger mutation. Screens subscribe to
+/// this instead of requiring the user to close and reopen the app.
+final ledgerDataRevision = ValueNotifier<int>(0);
+void notifyLedgerChanged() => ledgerDataRevision.value++;
 
 class AppDb {
   AppDb._();
@@ -90,6 +96,14 @@ class AppDb {
       period TEXT NOT NULL DEFAULT 'monthly'
     )''');
     await db.execute('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    await db.execute('''CREATE TABLE IF NOT EXISTS transaction_evidence(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, transaction_id INTEGER NOT NULL,
+      source TEXT NOT NULL, external_id TEXT NOT NULL, source_label TEXT NOT NULL DEFAULT '',
+      occurred_at INTEGER NOT NULL, amount REAL NOT NULL, merchant_hint TEXT NOT NULL DEFAULT '',
+      reference_hint TEXT NOT NULL DEFAULT '', metadata_json TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+      UNIQUE(source, external_id),
+      FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+    )''');
     await db.execute('''CREATE TABLE IF NOT EXISTS categories(
       name TEXT PRIMARY KEY,
       kind TEXT NOT NULL,
@@ -171,11 +185,18 @@ class AppDb {
       FOREIGN KEY(transaction_id) REFERENCES transactions(id) ON DELETE SET NULL,
       UNIQUE(card_id, transaction_id)
     )''');
+    await db.execute('''CREATE TABLE IF NOT EXISTS ai_chat_messages(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )''');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_time ON transactions(occurred_at)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_amount ON transactions(amount)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_review ON transactions(review_status)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_tx_normalized_merchant ON transactions(normalized_merchant)');
     await db.execute('CREATE INDEX IF NOT EXISTS idx_card_ledger_card_time ON card_ledger_entries(card_id, occurred_at)');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ai_chat_created ON ai_chat_messages(created_at)');
   }
 
   Future<void> _ensureColumn(Database db, String table, String column, String definition) async {
@@ -303,6 +324,22 @@ class AppDb {
     return rows.map(TxRecord.fromMap).toList();
   }
 
+  Future<List<Map<String, Object?>>> aiChatHistory({int limit = 80}) async {
+    final db = await database;
+    final rows = await db.query('ai_chat_messages', orderBy: 'created_at DESC', limit: limit);
+    return rows.reversed.map((row) => Map<String, Object?>.from(row)).toList();
+  }
+
+  Future<void> addAiChatMessage({required String role, required String content}) async {
+    final db = await database;
+    await db.insert('ai_chat_messages', {'role': role, 'content': content.trim(), 'created_at': DateTime.now().millisecondsSinceEpoch});
+  }
+
+  Future<void> clearAiChatHistory() async {
+    final db = await database;
+    await db.delete('ai_chat_messages');
+  }
+
   Future<List<PaymentCardRecord>> paymentCards() async {
     final db = await database;
     final rows = await db.query('payment_cards', orderBy: 'created_at DESC');
@@ -383,7 +420,8 @@ class AppDb {
       GROUP BY month ORDER BY month
     ''', [cardId, start, end]);
     final values = <int, double>{for (final row in rows) (row['month'] as num).toInt(): (row['total'] as num).toDouble()};
-    return List.generate(12, (index) => {'label': 'M${index + 1}', 'total': values[index + 1] ?? 0});
+    const labels = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return List.generate(12, (index) => {'label': labels[index], 'total': values[index + 1] ?? 0});
   }
 
   /// Link accepted SMS/notification transactions when their text includes a
@@ -416,25 +454,29 @@ class AppDb {
     final now = DateTime.now().millisecondsSinceEpoch;
     final rawMerchant = merchant.trim().isEmpty ? 'Manual transaction' : merchant.trim();
     final normalized = await normalizedMerchant(rawMerchant);
-    return db.insert('transactions', {
+    final id = await db.insert('transactions', {
       'amount': amount, 'type': type, 'category': category, 'merchant': rawMerchant, 'normalized_merchant': normalized,
       'note': note.trim(), 'source': 'manual', 'raw_message': '', 'sender': '', 'payment_method': paymentMethod,
       'account_hint': '', 'upi_reference': '', 'classification_method': 'manual', 'classification_confidence': 1.0,
       'review_status': 'accepted', 'occurred_at': now, 'created_at': now,
       'fingerprint': 'manual-$now-${DateTime.now().microsecondsSinceEpoch}', 'is_manual': 1,
     });
+    if (id > 0) notifyLedgerChanged();
+    return id;
   }
 
   Future<int> addReceiptTransaction({required double amount, required String merchant, required String category, required String rawText, String note = ''}) async {
     final db = await database;
     final now = DateTime.now().millisecondsSinceEpoch;
     final normalized = await normalizedMerchant(merchant);
-    return db.insert('transactions', {
+    final id = await db.insert('transactions', {
       'amount': amount, 'type': 'expense', 'category': category, 'merchant': merchant, 'normalized_merchant': normalized,
       'note': note, 'source': 'receipt_ocr', 'raw_message': rawText, 'sender': 'Receipt', 'payment_method': 'Receipt',
       'classification_method': 'receipt_ocr', 'classification_confidence': 0.9, 'review_status': 'accepted',
       'occurred_at': now, 'created_at': now, 'fingerprint': 'receipt-$now-${amount.toStringAsFixed(2)}', 'is_manual': 1,
     });
+    if (id > 0) notifyLedgerChanged();
+    return id;
   }
 
   Future<int> addUpiTransaction({required double amount, required String merchant, required String category, required String note, required String upiReference, String rawResponse = ''}) async {
@@ -444,12 +486,37 @@ class AppDb {
     final rawMerchant = merchant.trim().isEmpty ? 'UPI payment' : merchant.trim();
     final normalized = await normalizedMerchant(rawMerchant);
     final fingerprint = ref.isNotEmpty ? 'upi-$ref' : 'upi-${amount.toStringAsFixed(2)}-${normalized.toLowerCase()}-${now ~/ 60000}';
-    return db.insert('transactions', {
+    final id = await db.insert('transactions', {
       'amount': amount, 'type': 'expense', 'category': category, 'merchant': rawMerchant, 'normalized_merchant': normalized,
       'note': note.trim(), 'source': 'upi_intent', 'raw_message': rawResponse, 'sender': '', 'payment_method': 'UPI',
       'account_hint': '', 'upi_reference': ref, 'classification_method': 'upi_intent', 'classification_confidence': 1.0,
       'review_status': 'accepted', 'occurred_at': now, 'created_at': now, 'fingerprint': fingerprint, 'is_manual': 0,
     }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    if (id > 0) notifyLedgerChanged();
+    return id;
+  }
+
+  /// Adds source evidence for pre-pipeline records once. New SMS, app and
+  /// Gmail events write this at ingestion time in the Android native layer.
+  Future<void> backfillTransactionEvidence() async {
+    final db = await database;
+    final rows = await db.query('transactions', columns: [
+      'id', 'source', 'fingerprint', 'sender', 'occurred_at', 'amount', 'merchant', 'upi_reference'
+    ]);
+    final batch = db.batch();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final row in rows) {
+      final source = '${row['source'] ?? ''}';
+      final fingerprint = '${row['fingerprint'] ?? ''}';
+      if (source.isEmpty || fingerprint.isEmpty) continue;
+      batch.insert('transaction_evidence', {
+        'transaction_id': row['id'], 'source': source, 'external_id': fingerprint,
+        'source_label': '${row['sender'] ?? ''}', 'occurred_at': row['occurred_at'],
+        'amount': row['amount'], 'merchant_hint': '${row['merchant'] ?? ''}',
+        'reference_hint': '${row['upi_reference'] ?? ''}', 'metadata_json': '', 'created_at': now,
+      }, conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+    await batch.commit(noResult: true);
   }
 
   bool _unsafeBroadRule(String keyword) {
@@ -561,6 +628,7 @@ class AppDb {
         if (existing.isEmpty) { await db.insert('rules', values); } else { await db.update('rules', values, where: 'id=?', whereArgs: [existing.first['id']]); }
       }
     }
+    notifyLedgerChanged();
   }
 
   Future<int> countSimilarTransactions(TxRecord source) async {
@@ -733,17 +801,20 @@ class AppDb {
     final db = await database;
     await db.update('transactions', {'review_status': 'accepted'}, where: 'id=?', whereArgs: [id]);
     await db.insert('review_feedback', {'transaction_id': id, 'action': 'accepted', 'created_at': DateTime.now().millisecondsSinceEpoch});
+    notifyLedgerChanged();
   }
 
   Future<void> ignoreReview(int id) async {
     final db = await database;
     await db.update('transactions', {'review_status': 'ignored'}, where: 'id=?', whereArgs: [id]);
     await db.insert('review_feedback', {'transaction_id': id, 'action': 'ignored', 'created_at': DateTime.now().millisecondsSinceEpoch});
+    notifyLedgerChanged();
   }
 
   Future<void> deleteTransaction(int id) async {
     final db = await database;
     await db.delete('transactions', where: 'id=?', whereArgs: [id]);
+    notifyLedgerChanged();
   }
 
   Future<TxRecord?> transactionById(int id) async {
@@ -761,6 +832,7 @@ class AppDb {
       }
       await txn.update('transactions', {'is_split_parent': splits.isEmpty ? 0 : 1}, where: 'id=?', whereArgs: [transactionId]);
     });
+    notifyLedgerChanged();
   }
 
   Future<List<Map<String, Object?>>> splitsFor(int transactionId) async {

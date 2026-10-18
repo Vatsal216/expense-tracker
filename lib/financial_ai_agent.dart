@@ -155,111 +155,128 @@ class AiAdvisorPage extends StatefulWidget {
 }
 
 class _AiAdvisorPageState extends State<AiAdvisorPage> {
-  AiProvider _provider = AiProvider.gemini;
-  late final TextEditingController _model = TextEditingController(text: _provider.defaultModel);
-  final _key = TextEditingController();
   final _question = TextEditingController();
-  bool _loadingKey = true;
   bool _asking = false;
-  bool _showKey = false;
-  String? _answer;
+  bool _loading = true;
+  List<Map<String, Object?>> _messages = const [];
+  List<double> _trend = const [];
+  Map<String, double> _categories = const {};
+  List<TxRecord> _weekUpi = const [];
+  double _spent = 0;
+  double _income = 0;
+  double _budget = 0;
 
   @override
-  void initState() { super.initState(); _restore(); }
+  void initState() { super.initState(); _load(); }
 
-  Future<void> _restore() async {
-    final name = await AppDb.instance.getSetting('ai_agent_provider', fallback: AiProvider.gemini.name);
-    final matches = AiProvider.values.where((item) => item.name == name);
-    final provider = matches.isEmpty ? AiProvider.gemini : matches.first;
-    final model = await AppDb.instance.getSetting('ai_agent_model', fallback: provider.defaultModel);
-    final savedKey = await FinanceApiKeyVault.read(provider);
+  Future<void> _load() async {
+    final now = DateTime.now();
+    final start = DateTime(now.year, now.month - 5, 1).millisecondsSinceEpoch;
+    final end = DateTime(now.year, now.month + 1, 1).millisecondsSinceEpoch;
+    final data = await Future.wait<dynamic>([
+      AppDb.instance.aiChatHistory(),
+      AppDb.instance.totalsByTypeForPeriod(start, end),
+      AppDb.instance.expenseByCategoryForPeriod(start, end),
+      AppDb.instance.expenseTrendForPeriod(start, end, buckets: 6),
+      AppDb.instance.overallBudget(),
+      AppDb.instance.transactions(limit: 400),
+    ]);
     if (!mounted) return;
-    setState(() { _provider = provider; _model.text = model; _key.text = savedKey ?? ''; _loadingKey = false; });
-  }
-
-  Future<void> _changeProvider(AiProvider provider) async {
-    final savedKey = await FinanceApiKeyVault.read(provider);
-    setState(() { _provider = provider; _model.text = provider.defaultModel; _key.text = savedKey ?? ''; });
-  }
-
-  Future<void> _save() async {
-    if (_key.text.trim().isEmpty || _model.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter both an API key and model name.')));
-      return;
-    }
-    await FinanceApiKeyVault.save(_provider, _key.text);
-    await AppDb.instance.setSetting('ai_agent_provider', _provider.name);
-    await AppDb.instance.setSetting('ai_agent_model', _model.text.trim());
-    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Saved securely on this device.')));
+    final totals = data[1] as Map<String, double>;
+    final today = DateTime.now();
+    final weekStart = DateTime(today.year, today.month, today.day).subtract(Duration(days: today.weekday - 1));
+    final records = data[5] as List<TxRecord>;
+    setState(() { _messages = data[0] as List<Map<String, Object?>>; _spent = totals['expense'] ?? 0; _income = totals['income'] ?? 0; _categories = data[2] as Map<String, double>; _trend = data[3] as List<double>; _budget = data[4] as double; _weekUpi = records.where((tx) => tx.type == 'expense' && tx.occurredAt >= weekStart.millisecondsSinceEpoch && tx.paymentMethod.toLowerCase().contains('upi')).toList(); _loading = false; });
   }
 
   Future<void> _ask() async {
-    if (_question.text.trim().isEmpty) return;
-    await _save();
-    if (_key.text.trim().isEmpty || _model.text.trim().isEmpty) return;
-    setState(() { _asking = true; _answer = null; });
+    final question = _question.text.trim();
+    if (question.isEmpty || _asking) return;
+    final providerName = await AppDb.instance.getSetting('ai_agent_provider', fallback: AiProvider.gemini.name);
+    final providers = AiProvider.values.where((item) => item.name == providerName).toList();
+    final provider = providers.isEmpty ? AiProvider.gemini : providers.first;
+    final model = await AppDb.instance.getSetting('ai_agent_model', fallback: provider.defaultModel);
+    final key = await FinanceApiKeyVault.read(provider);
+    if (key == null || key.isEmpty) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Set up your AI provider in Settings first.')));
+      return;
+    }
+    await AppDb.instance.addAiChatMessage(role: 'user', content: question);
+    _question.clear();
+    if (mounted) setState(() { _messages = [..._messages, {'role': 'user', 'content': question, 'created_at': DateTime.now().millisecondsSinceEpoch}]; _asking = true; });
     try {
       final answer = await FinanceAgent().ask(
-        config: AiAgentConfig(provider: _provider, model: _model.text.trim()),
-        apiKey: _key.text.trim(),
-        question: _question.text,
+        config: AiAgentConfig(provider: provider, model: model),
+        apiKey: key,
+        question: question,
       );
-      if (mounted) setState(() => _answer = answer);
+      await AppDb.instance.addAiChatMessage(role: 'assistant', content: answer);
+      if (mounted) setState(() => _messages = [..._messages, {'role': 'assistant', 'content': answer, 'created_at': DateTime.now().millisecondsSinceEpoch}]);
     } catch (error) {
-      if (mounted) setState(() => _answer = 'Could not get an answer: ${error.toString().replaceFirst('Exception: ', '')}');
+      final answer = 'Could not get an answer: ${error.toString().replaceFirst('Exception: ', '')}';
+      await AppDb.instance.addAiChatMessage(role: 'assistant', content: answer);
+      if (mounted) setState(() => _messages = [..._messages, {'role': 'assistant', 'content': answer, 'created_at': DateTime.now().millisecondsSinceEpoch}]);
     } finally {
       if (mounted) setState(() => _asking = false);
     }
   }
 
+  Future<void> _clearHistory() async {
+    await AppDb.instance.clearAiChatHistory();
+    if (mounted) setState(() => _messages = const []);
+  }
+
   @override
-  void dispose() { _model.dispose(); _key.dispose(); _question.dispose(); super.dispose(); }
+  void dispose() { _question.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('AI Advisor')),
-        body: _loadingKey
+        appBar: AppBar(title: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text('AI Advisor'), Text('Ask about your money', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500))]), actions: [IconButton(onPressed: _messages.isEmpty ? null : _clearHistory, tooltip: 'Clear chat', icon: const Icon(Icons.history_rounded))]),
+        body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : ListView(
-                padding: const EdgeInsets.fromLTRB(18, 18, 18, 32),
+            : Column(
                 children: [
-                  FintechSurface(
-                    child: const Row(children: [
-                      CircleAvatar(child: Icon(Icons.auto_awesome_rounded)), SizedBox(width: 12),
-                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text('Your private finance context', style: TextStyle(fontWeight: FontWeight.w900)),
-                        SizedBox(height: 3),
-                        Text('The selected provider receives only your approved transaction summary, budgets and category totals. Raw SMS, UPI references and account hints are never sent.'),
-                      ])),
-                    ]),
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
+                      children: [
+                        if (_messages.isEmpty) const _AdvisorWelcome(),
+                        for (var index = 0; index < _messages.length; index++) ...[
+                          _AdvisorBubble(role: '${_messages[index]['role']}', content: '${_messages[index]['content']}'),
+                          if ('${_messages[index]['role']}' == 'assistant')
+                            _AdvisorVisualForQuery(query: _questionBefore(index), spent: _spent, income: _income, budget: _budget, categories: _categories, trend: _trend, upi: _weekUpi),
+                        ],
+                        if (_asking) const _AdvisorBubble(role: 'assistant', content: 'Thinking…', loading: true),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 18),
-                  const Text('Provider', style: TextStyle(fontWeight: FontWeight.w900)),
-                  const SizedBox(height: 8),
-                  DropdownButtonFormField<AiProvider>(
-                    value: _provider,
-                    items: AiProvider.values.map((provider) => DropdownMenuItem(value: provider, child: Text(provider.label))).toList(),
-                    onChanged: (value) { if (value != null) _changeProvider(value); },
+                  SafeArea(
+                    top: false,
+                    child: Container(
+                      decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface, border: Border(top: BorderSide(color: Theme.of(context).colorScheme.outline))),
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
+                      child: Row(children: [
+                        IconButton(onPressed: () {}, icon: const Icon(Icons.add_circle_outline_rounded)),
+                        Expanded(child: TextField(controller: _question, textCapitalization: TextCapitalization.sentences, minLines: 1, maxLines: 4, onSubmitted: (_) => _ask(), decoration: const InputDecoration(hintText: 'Ask about spending, cards or budgets', prefixIcon: Icon(Icons.auto_awesome_rounded)))),
+                        const SizedBox(width: 8),
+                        IconButton.filled(onPressed: _asking ? null : _ask, icon: const Icon(Icons.arrow_upward_rounded)),
+                      ]),
+                    ),
                   ),
-                  const SizedBox(height: 12),
-                  TextField(controller: _model, decoration: const InputDecoration(labelText: 'Model name', prefixIcon: Icon(Icons.memory_rounded))),
-                  const SizedBox(height: 12),
-                  TextField(controller: _key, obscureText: !_showKey, autocorrect: false, enableSuggestions: false, decoration: InputDecoration(labelText: '${_provider.label} API key', prefixIcon: const Icon(Icons.key_rounded), suffixIcon: IconButton(icon: Icon(_showKey ? Icons.visibility_off_rounded : Icons.visibility_rounded), onPressed: () => setState(() => _showKey = !_showKey)))),
-                  const SizedBox(height: 10),
-                  Text('Your key is stored with Android secure storage and is used only for requests you send.', style: Theme.of(context).textTheme.bodySmall),
-                  const SizedBox(height: 16),
-                  OutlinedButton.icon(onPressed: _save, icon: const Icon(Icons.lock_outline_rounded), label: const Text('Save provider setup')),
-                  const SizedBox(height: 24),
-                  const Text('Ask about your money', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18)),
-                  const SizedBox(height: 8),
-                  TextField(controller: _question, minLines: 3, maxLines: 6, decoration: const InputDecoration(hintText: 'Example: What changed in my spending this month?')),
-                  const SizedBox(height: 12),
-                  FilledButton.icon(onPressed: _asking ? null : _ask, icon: _asking ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.send_rounded), label: Text(_asking ? 'Analysing…' : 'Ask AI Advisor')),
-                  if (_answer != null) ...[
-                    const SizedBox(height: 18),
-                    FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Advisor response', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 10), SelectableText(_answer!, style: const TextStyle(height: 1.45))])),
-                  ],
                 ],
               ),
       );
+
+  String _questionBefore(int index) { for (var i = index - 1; i >= 0; i--) { if ('${_messages[i]['role']}' == 'user') return '${_messages[i]['content']}'; } return ''; }
 }
+
+class _AdvisorWelcome extends StatelessWidget { const _AdvisorWelcome(); @override Widget build(BuildContext context) => Padding(padding: const EdgeInsets.fromLTRB(8, 30, 8, 18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [CircleAvatar(backgroundColor: FintechDesign.pale, child: Icon(Icons.auto_awesome_rounded, color: FintechDesign.mint)), const SizedBox(width: 10), const Expanded(child: Text('Your private financial advisor', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)))]), const SizedBox(height: 8), const Text('Ask a question and get a live answer with the relevant money view.'), const SizedBox(height: 18), Wrap(spacing: 8, runSpacing: 8, children: const [Chip(label: Text('UPI spending this week')), Chip(label: Text('Where did I spend most?')), Chip(label: Text('How is my budget?'))]) ])); }
+class _AdvisorBubble extends StatelessWidget { final String role; final String content; final bool loading; const _AdvisorBubble({required this.role, required this.content, this.loading = false}); @override Widget build(BuildContext context) { final user = role == 'user'; final bubble = Container(constraints: const BoxConstraints(maxWidth: 330), margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13), decoration: BoxDecoration(color: user ? const Color(0xFFD6F4E5) : Colors.white, borderRadius: BorderRadius.only(topLeft: const Radius.circular(22), topRight: const Radius.circular(22), bottomLeft: Radius.circular(user ? 22 : 6), bottomRight: Radius.circular(user ? 6 : 22)), border: Border.all(color: const Color(0xFFDDE7E8))), child: loading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : SelectableText(content, style: const TextStyle(color: FintechDesign.ink, height: 1.4, fontSize: 16))); return Padding(padding: const EdgeInsets.only(bottom: 12), child: Row(mainAxisAlignment: user ? MainAxisAlignment.end : MainAxisAlignment.start, crossAxisAlignment: CrossAxisAlignment.start, children: [if (!user) ...[CircleAvatar(radius: 18, backgroundColor: FintechDesign.pale, child: Icon(Icons.smart_toy_outlined, color: FintechDesign.mint, size: 20)), const SizedBox(width: 8)], bubble])); }}
+
+class _AdvisorVisualForQuery extends StatelessWidget { final String query; final double spent; final double income; final double budget; final Map<String, double> categories; final List<double> trend; final List<TxRecord> upi; const _AdvisorVisualForQuery({required this.query, required this.spent, required this.income, required this.budget, required this.categories, required this.trend, required this.upi}); @override Widget build(BuildContext context) { final q = query.toLowerCase(); final currency = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0); final entries = categories.entries.toList()..sort((a, b) => b.value.compareTo(a.value)); final upiMode = q.contains('upi'); final categoryMode = q.contains('category') || q.contains('where') || q.contains('merchant'); final budgetMode = q.contains('budget') || q.contains('limit'); final cashMode = q.contains('income') || q.contains('cash') || q.contains('balance') || q.contains('save'); if (upiMode) return _UpiInsightCard(transactions: upi); if (budgetMode) { final used = budget <= 0 ? 0.0 : (spent / 6 / budget).clamp(0.0, 1.0).toDouble(); return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Budget progress', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 6), Text(budget > 0 ? '${currency.format(spent / 6)} average monthly spend of ${currency.format(budget)} budget' : 'No monthly budget has been set yet.'), if (budget > 0) ...[const SizedBox(height: 10), LinearProgressIndicator(value: used, minHeight: 9, borderRadius: BorderRadius.circular(9)), const SizedBox(height: 5), Text('${(used * 100).round()}% of monthly budget used on average')]])); } if (cashMode) return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Cash-flow view · last 6 months', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 12), Row(children: [Expanded(child: _VisualMetric(label: 'Income', value: currency.format(income), color: const Color(0xFF087A57))), Expanded(child: _VisualMetric(label: 'Expenses', value: currency.format(spent), color: const Color(0xFFCF5151))), Expanded(child: _VisualMetric(label: 'Net', value: currency.format(income - spent), color: const Color(0xFF243743)))]))); if (categoryMode) return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Category breakdown · last 6 months', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 8), if (entries.isEmpty) const Text('No expense data yet.') else ...entries.take(4).map((e) => Padding(padding: const EdgeInsets.only(top: 9), child: Row(children: [Expanded(child: Text(e.key, overflow: TextOverflow.ellipsis)), Text(currency.format(e.value), style: const TextStyle(fontWeight: FontWeight.w800))])))])); final maximum = trend.fold<double>(0, (a, b) => a > b ? a : b); final now = DateTime.now(); return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('Spending trend · last 6 months', style: TextStyle(fontWeight: FontWeight.w900)), const SizedBox(height: 12), SizedBox(height: 96, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: List.generate(6, (i) { final value = i < trend.length ? trend[i] : 0; return Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [Text(value == 0 ? '' : '${(value / 1000).toStringAsFixed(0)}k', style: const TextStyle(fontSize: 9)), Container(height: maximum == 0 ? 5 : 8 + 45 * value / maximum, margin: const EdgeInsets.symmetric(horizontal: 3), decoration: BoxDecoration(color: const Color(0xFF0E9365), borderRadius: BorderRadius.circular(6))), const SizedBox(height: 5), Text(DateFormat.MMM().format(DateTime(now.year, now.month - 5 + i)), style: const TextStyle(fontSize: 9))])); })))])); }}
+
+class _UpiInsightCard extends StatelessWidget { final List<TxRecord> transactions; const _UpiInsightCard({required this.transactions}); @override Widget build(BuildContext context) { final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0); final days = List<double>.filled(7, 0); for (final tx in transactions) { final day = DateTime.fromMillisecondsSinceEpoch(tx.occurredAt).weekday - 1; days[day] += tx.amount; } final total = days.fold<double>(0, (a, b) => a + b); final top = transactions.isEmpty ? '' : (transactions.toList()..sort((a,b) => b.amount.compareTo(a.amount))).first.category; final maximum = days.fold<double>(0, (a,b) => a > b ? a : b); const labels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']; return Padding(padding: const EdgeInsets.only(left: 44, bottom: 14), child: FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('UPI spending · This week', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)), Text(money.format(total), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 31)), const SizedBox(height: 14), SizedBox(height: 110, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: List.generate(7, (i) => Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [Container(height: maximum == 0 ? 5 : 8 + 60 * days[i] / maximum, width: 18, decoration: BoxDecoration(color: FintechDesign.mint, borderRadius: BorderRadius.circular(9))), const SizedBox(height: 7), Text(labels[i], style: const TextStyle(fontSize: 10))])))), const SizedBox(height: 14), Wrap(spacing: 8, runSpacing: 8, children: [Chip(avatar: const Icon(Icons.payments_outlined, size: 17), label: Text('${transactions.length} payments')), if (top.isNotEmpty) Chip(avatar: const Icon(Icons.restaurant_outlined, size: 17), label: Text('Top: $top'))]) ])); }}
+class _VisualMetric extends StatelessWidget { final String label; final String value; final Color color; const _VisualMetric({required this.label, required this.value, required this.color}); @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: Theme.of(context).textTheme.bodySmall), const SizedBox(height: 4), Text(value, style: TextStyle(fontWeight: FontWeight.w900, color: color))]); }
+
+class AiAdvisorSettingsPage extends StatefulWidget { const AiAdvisorSettingsPage({super.key}); @override State<AiAdvisorSettingsPage> createState() => _AiAdvisorSettingsPageState(); }
+class _AiAdvisorSettingsPageState extends State<AiAdvisorSettingsPage> { AiProvider _provider = AiProvider.gemini; late final TextEditingController _model = TextEditingController(); final _key = TextEditingController(); bool _showKey = false; bool _loading = true; @override void initState() { super.initState(); _restore(); } Future<void> _restore() async { final name = await AppDb.instance.getSetting('ai_agent_provider', fallback: AiProvider.gemini.name); final providers = AiProvider.values.where((v) => v.name == name).toList(); _provider = providers.isEmpty ? AiProvider.gemini : providers.first; _model.text = await AppDb.instance.getSetting('ai_agent_model', fallback: _provider.defaultModel); _key.text = await FinanceApiKeyVault.read(_provider) ?? ''; if (mounted) setState(() => _loading = false); } Future<void> _save() async { if (_key.text.trim().isEmpty || _model.text.trim().isEmpty) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an API key and model name.'))); return; } await FinanceApiKeyVault.save(_provider, _key.text); await AppDb.instance.setSetting('ai_agent_provider', _provider.name); await AppDb.instance.setSetting('ai_agent_model', _model.text.trim()); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('AI provider saved securely on this device.'))); } @override void dispose() { _model.dispose(); _key.dispose(); super.dispose(); } @override Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('AI Advisor setup')), body: _loading ? const Center(child: CircularProgressIndicator()) : ListView(padding: const EdgeInsets.all(18), children: [const Text('Choose your own provider and API key. The key stays in Android secure storage.'), const SizedBox(height: 16), DropdownButtonFormField<AiProvider>(value: _provider, decoration: const InputDecoration(labelText: 'Provider'), items: AiProvider.values.map((v) => DropdownMenuItem(value: v, child: Text(v.label))).toList(), onChanged: (v) async { if (v == null) return; final key = await FinanceApiKeyVault.read(v); setState(() { _provider = v; _model.text = v.defaultModel; _key.text = key ?? ''; }); }), const SizedBox(height: 12), TextField(controller: _model, decoration: const InputDecoration(labelText: 'Model name')), const SizedBox(height: 12), TextField(controller: _key, obscureText: !_showKey, autocorrect: false, enableSuggestions: false, decoration: InputDecoration(labelText: '${_provider.label} API key', suffixIcon: IconButton(onPressed: () => setState(() => _showKey = !_showKey), icon: Icon(_showKey ? Icons.visibility_off_rounded : Icons.visibility_rounded)))), const SizedBox(height: 16), FilledButton.icon(onPressed: _save, icon: const Icon(Icons.save_outlined), label: const Text('Save AI setup')), const SizedBox(height: 20), const Text('Only a user-approved local finance summary is sent when you ask a question. Raw SMS, UPI references, account hints and notes are excluded.', style: TextStyle(height: 1.4))])); }
