@@ -165,6 +165,11 @@ class NativeBridge {
   static Future<bool> openPaymentApp(String provider) async =>
       await _channel.invokeMethod<bool>('openPaymentApp', {'provider': provider}) ?? false;
 
+  /// Opens an installed payment app's home screen. This never creates a UPI
+  /// payment request and therefore cannot send a QR, UPI ID, or amount.
+  static Future<bool> openPaymentPackage(String packageName) async =>
+      await _channel.invokeMethod<bool>('openPaymentPackage', {'packageName': packageName}) ?? false;
+
   static Future<UpiResult> startUpiPayment({
     required String paymentUri,
     String? packageName,

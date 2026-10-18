@@ -75,6 +75,7 @@ class MainActivity : FlutterFragmentActivity() {
                 "getUpiApps" -> getUpiApps(call.arguments as? Map<*, *>, result)
                 "startUpiPayment" -> startUpiPayment(call.arguments as? Map<*, *>, result)
                 "openPaymentApp" -> openPaymentApp(call.arguments as? Map<*, *>, result)
+                "openPaymentPackage" -> openPaymentPackage(call.arguments as? Map<*, *>, result)
                 else -> result.notImplemented()
             }
         }
@@ -305,6 +306,27 @@ class MainActivity : FlutterFragmentActivity() {
         try {
             startActivity(intent)
             result.success(true) // App opened, NOT payment completed.
+        } catch (e: Exception) {
+            result.error("APP_OPEN_FAILED", e.message, null)
+        }
+    }
+
+    // Opens a discovered UPI app's home screen only. No payment URI or amount
+    // crosses this method, so the user completes any scan/payment inside it.
+    private fun openPaymentPackage(args: Map<*, *>?, result: MethodChannel.Result) {
+        val targetPackage = args?.get("packageName")?.toString()?.trim().orEmpty()
+        if (targetPackage.isBlank()) {
+            result.error("INVALID_APP", "A payment app is required.", null)
+            return
+        }
+        val intent = packageManager.getLaunchIntentForPackage(targetPackage)
+        if (intent == null) {
+            result.error("APP_NOT_INSTALLED", "The selected payment app is not available.", null)
+            return
+        }
+        try {
+            startActivity(intent)
+            result.success(true)
         } catch (e: Exception) {
             result.error("APP_OPEN_FAILED", e.message, null)
         }

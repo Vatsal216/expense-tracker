@@ -7,6 +7,7 @@ import 'models.dart';
 import 'native_bridge.dart';
 import 'enhancements.dart';
 import 'financial_ai.dart';
+import 'financial_ai_agent.dart';
 import 'fintech_design.dart';
 
 const txTypes = ['expense', 'investment', 'income', 'transfer', 'refund'];
@@ -188,6 +189,13 @@ class PlanPage extends StatelessWidget {
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Plan'),
+            actions: [
+              IconButton(
+                tooltip: 'AI Advisor',
+                icon: const Icon(Icons.auto_awesome_rounded),
+                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorPage())),
+              ),
+            ],
             bottom: const TabBar(
               tabs: [
                 Tab(icon: Icon(Icons.chat_bubble_outline_rounded), text: 'Money planner'),
@@ -359,69 +367,15 @@ class _HomePageState extends State<HomePage> {
                     child: ClipRRect(borderRadius: BorderRadius.circular(13), child: Image.asset('assets/logo.png')),
                   ),
                   const SizedBox(width: 12),
-                  const Expanded(child: PageHeader(title: 'Expense Tracker', subtitle: 'Your money, automatically organised')),
+                  const Expanded(child: PageHeader(title: 'Good to see you', subtitle: 'Your spending at a glance')),
                   IconButton.filledTonal(onPressed: widget.onChanged, icon: const Icon(Icons.sync_rounded)),
                 ],
               ),
               const SizedBox(height: 18),
-              SizedBox(
-                height: 50,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: [
-                    _periodChip('week', 'Week', Icons.date_range_rounded),
-                    _periodChip('month', 'Month', Icons.calendar_month_rounded),
-                    _periodChip('day', 'Day', Icons.today_rounded),
-                    _periodChip('total', 'Total', Icons.all_inclusive_rounded),
-                    _periodChip('custom', 'Custom', Icons.tune_rounded),
-                  ],
-                ),
-              ),
+              Align(alignment: Alignment.centerLeft, child: _periodMenu()),
               const SizedBox(height: 16),
               _heroCard(spent: spent, income: income, invested: invested, refunds: refunds, budget: budget, remaining: remaining, progress: progress),
               const SizedBox(height: 22),
-              SectionHeader(
-                title: 'Money Map',
-                subtitle: 'Where you are spending and investing for $_periodSubtitle',
-                actionLabel: 'View report',
-                onAction: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => MoneyMapPage(
-                      initialPeriod: period,
-                      initialCustomRange: period == 'custom' ? customRange : null,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              _MoneyMapAsyncPreview(
-                startMs: selectedRange.$1,
-                endMs: selectedRange.$2,
-                periodLabel: _periodSubtitle,
-              ),
-              const SizedBox(height: 22),
-              SectionHeader(
-                title: 'Financial inbox',
-                subtitle: review.isEmpty ? 'Nothing needs your attention' : '${review.length} transaction${review.length == 1 ? '' : 's'} need a quick check',
-                actionLabel: review.isEmpty ? null : 'Review',
-                onAction: review.isEmpty ? null : () async {
-                  await Navigator.push(context, MaterialPageRoute(builder: (_) => const ReviewQueuePage()));
-                  widget.onChanged();
-                },
-              ),
-              const SizedBox(height: 12),
-              _FinancialInboxPreview(items: review.take(2).toList(), onChanged: widget.onChanged),
-              const SizedBox(height: 22),
-              const SectionHeader(title: 'Quick actions', subtitle: 'Common things, one tap away'),
-              const SizedBox(height: 12),
-              FintechBentoGrid(
-                children: [
-                  QuickActionCard(icon: Icons.qr_code_2_rounded, label: 'Pay by UPI', caption: 'Scan a QR or enter details', onTap: () => widget.onNavigate(2)),
-                  QuickActionCard(icon: Icons.add_rounded, label: 'Add transaction', caption: 'Record cash or an adjustment', onTap: () async { await showAddTransaction(context); widget.onChanged(); }),
-                  QuickActionCard(icon: Icons.account_balance_wallet_rounded, label: 'Manage budgets', caption: 'Set a spending limit', onTap: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => const BudgetsPage())); widget.onChanged(); }),
-                ],
-              ),
               const SizedBox(height: 24),
               SectionHeader(
                 title: 'Recent activity',
@@ -461,17 +415,25 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _periodChip(String value, String label, IconData icon) {
-    return Padding(
-      padding: const EdgeInsets.only(right: FintechSpace.xs),
-      child: FintechFilterPill(
-        label: label,
-        icon: icon,
-        selected: period == value,
-        onTap: () => _selectPeriod(value),
-      ),
-    );
-  }
+  Widget _periodMenu() => PopupMenuButton<String>(
+        onSelected: _selectPeriod,
+        itemBuilder: (context) => const [
+          PopupMenuItem(value: 'week', child: Text('This week')),
+          PopupMenuItem(value: 'month', child: Text('This month')),
+          PopupMenuItem(value: 'day', child: Text('Today')),
+          PopupMenuItem(value: 'total', child: Text('All time')),
+          PopupMenuItem(value: 'custom', child: Text('Custom range')),
+        ],
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(color: const Color(0xFFF0F4F1), borderRadius: BorderRadius.circular(12)),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(_periodSubtitle, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
+            const SizedBox(width: 4),
+            const Icon(Icons.keyboard_arrow_down_rounded, size: 18),
+          ]),
+        ),
+      );
 
   Widget _heroCard({
     required double spent,
@@ -1960,7 +1922,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
           padding: const EdgeInsets.fromLTRB(18, 18, 18, 8),
           child: Row(
             children: [
-              const Expanded(child: PageHeader(title: 'Transactions', subtitle: 'SMS, PhonePe, UPI and manual entries')),
+              const Expanded(child: PageHeader(title: 'Activity', subtitle: 'Your recent transactions')),
               IconButton(
                 onPressed: () async {
                   await showAddTransaction(context);
@@ -1977,13 +1939,13 @@ class _TransactionsPageState extends State<TransactionsPage> {
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            children: ['all', ...txTypes]
+            children: const ['all', 'expense', 'investment', 'income']
                 .map((t) {
                   final selected = filter == t;
                   return Padding(
                     padding: const EdgeInsets.only(right: 8),
                     child: FintechFilterPill(
-                      label: titleCase(t),
+                      label: switch (t) { 'all' => 'All', 'expense' => 'Expenses', 'investment' => 'Investments', _ => 'Income' },
                       selected: selected,
                       onTap: () => setState(() => filter = t),
                     ),
@@ -2704,7 +2666,11 @@ class _PayUpiPageState extends State<PayUpiPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => DirectAppPayPage(onChanged: widget.onChanged);
+
+  // The old QR/manual flow remains in source for existing deep links, but this
+  // screen intentionally launches payment apps directly as requested.
+  Widget _legacyPaymentForm(BuildContext context) {
     return FutureBuilder<List<CategoryRecord>>(
       future: AppDb.instance.expenseCategories(),
       builder: (context, snap) {
@@ -2859,6 +2825,90 @@ class _PayUpiPageState extends State<PayUpiPage> {
       },
     );
   }
+}
+
+
+class DirectAppPayPage extends StatefulWidget {
+  final VoidCallback onChanged;
+  const DirectAppPayPage({super.key, required this.onChanged});
+
+  @override
+  State<DirectAppPayPage> createState() => _DirectAppPayPageState();
+}
+
+class _DirectAppPayPageState extends State<DirectAppPayPage> {
+  static const _discoveryUri = 'upi://pay?pa=expense.tracker%40upi&pn=Expense%20Tracker&am=1&cu=INR';
+  late Future<List<UpiApp>> _apps = NativeBridge.getUpiApps(paymentUri: _discoveryUri);
+
+  Future<void> _launch(UpiApp app) async {
+    try {
+      await NativeBridge.openPaymentPackage(app.packageName);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${app.name} opened. Complete your payment inside the app.')));
+    } on PlatformException catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message ?? 'Could not open ${app.name}.')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<List<UpiApp>>(
+        future: _apps,
+        builder: (context, snapshot) {
+          final apps = snapshot.data ?? const <UpiApp>[];
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(18, 22, 18, 104),
+            children: [
+              const PageHeader(title: 'Pay', subtitle: 'Choose a payment app'),
+              const SizedBox(height: 22),
+              if (snapshot.connectionState == ConnectionState.waiting)
+                const Padding(padding: EdgeInsets.all(30), child: Center(child: CircularProgressIndicator()))
+              else if (snapshot.hasError || apps.isEmpty)
+                FintechSurface(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Icon(Icons.account_balance_wallet_outlined, size: 28),
+                    const SizedBox(height: 12),
+                    const Text('No payment app found', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+                    const SizedBox(height: 4),
+                    const Text('Install or finish setting up a UPI app, then refresh this screen.'),
+                    const SizedBox(height: 14),
+                    OutlinedButton.icon(onPressed: () => setState(() => _apps = NativeBridge.getUpiApps(paymentUri: _discoveryUri)), icon: const Icon(Icons.refresh_rounded), label: const Text('Refresh')),
+                  ]),
+                )
+              else
+                FintechSurface(
+                  padding: EdgeInsets.zero,
+                  child: Column(children: [
+                    for (var index = 0; index < apps.length; index++) ...[
+                      _PaymentAppRow(app: apps[index], onTap: () => _launch(apps[index])),
+                      if (index < apps.length - 1) const Divider(height: 1),
+                    ],
+                  ]),
+                ),
+              const SizedBox(height: 20),
+              Text('Your transaction will be completed inside the payment app. This screen does not ask for a QR, UPI ID, or amount.', style: Theme.of(context).textTheme.bodySmall?.copyWith(height: 1.4)),
+            ],
+          );
+        },
+      );
+}
+
+class _PaymentAppRow extends StatelessWidget {
+  final UpiApp app;
+  final VoidCallback onTap;
+  const _PaymentAppRow({required this.app, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        leading: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(color: const Color(0xFFEAF5EF), borderRadius: BorderRadius.circular(10)),
+          child: const Icon(Icons.account_balance_wallet_rounded, color: Color(0xFF08794D), size: 18),
+        ),
+        title: Text(app.name, style: const TextStyle(fontWeight: FontWeight.w800)),
+        trailing: const Icon(Icons.chevron_right_rounded, size: 22),
+        onTap: onTap,
+      );
 }
 
 
