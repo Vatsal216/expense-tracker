@@ -107,7 +107,7 @@ class GmailExpenseService {
     return parts.whereType<Map>().map((part) => _bodyText(part)).join('\n');
   }
 
-  String _senderName(String from) => from.replaceAll(RegExp(r'<.*>'), '').replaceAll(RegExp(r"[\"']"), '').trim();
+  String _senderName(String from) => from.replaceAll(RegExp(r'<.*>'), '').replaceAll(RegExp("[\\\"']"), '').trim();
 }
 
 class _EmailPayload { final String sender; final String subject; final String body; final int occurredAt; const _EmailPayload({required this.sender, required this.subject, required this.body, required this.occurredAt}); }

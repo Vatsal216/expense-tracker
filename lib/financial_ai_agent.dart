@@ -270,6 +270,7 @@ class _AiAdvisorPageState extends State<AiAdvisorPage> {
   String _questionBefore(int index) { for (var i = index - 1; i >= 0; i--) { if ('${_messages[i]['role']}' == 'user') return '${_messages[i]['content']}'; } return ''; }
 }
 
+/* Legacy compact UI implementation retained as a comment during migration.
 class _AdvisorWelcome extends StatelessWidget { const _AdvisorWelcome(); @override Widget build(BuildContext context) => Padding(padding: const EdgeInsets.fromLTRB(8, 30, 8, 18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Row(children: [CircleAvatar(backgroundColor: FintechDesign.pale, child: Icon(Icons.auto_awesome_rounded, color: FintechDesign.mint)), const SizedBox(width: 10), const Expanded(child: Text('Your private financial advisor', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)))]), const SizedBox(height: 8), const Text('Ask a question and get a live answer with the relevant money view.'), const SizedBox(height: 18), Wrap(spacing: 8, runSpacing: 8, children: const [Chip(label: Text('UPI spending this week')), Chip(label: Text('Where did I spend most?')), Chip(label: Text('How is my budget?'))]) ])); }
 class _AdvisorBubble extends StatelessWidget { final String role; final String content; final bool loading; const _AdvisorBubble({required this.role, required this.content, this.loading = false}); @override Widget build(BuildContext context) { final user = role == 'user'; final bubble = Container(constraints: const BoxConstraints(maxWidth: 330), margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13), decoration: BoxDecoration(color: user ? const Color(0xFFD6F4E5) : Colors.white, borderRadius: BorderRadius.only(topLeft: const Radius.circular(22), topRight: const Radius.circular(22), bottomLeft: Radius.circular(user ? 22 : 6), bottomRight: Radius.circular(user ? 6 : 22)), border: Border.all(color: const Color(0xFFDDE7E8))), child: loading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : SelectableText(content, style: const TextStyle(color: FintechDesign.ink, height: 1.4, fontSize: 16))); return Padding(padding: const EdgeInsets.only(bottom: 12), child: Row(mainAxisAlignment: user ? MainAxisAlignment.end : MainAxisAlignment.start, crossAxisAlignment: CrossAxisAlignment.start, children: [if (!user) ...[CircleAvatar(radius: 18, backgroundColor: FintechDesign.pale, child: Icon(Icons.smart_toy_outlined, color: FintechDesign.mint, size: 20)), const SizedBox(width: 8)], bubble])); }}
 
@@ -277,6 +278,94 @@ class _AdvisorVisualForQuery extends StatelessWidget { final String query; final
 
 class _UpiInsightCard extends StatelessWidget { final List<TxRecord> transactions; const _UpiInsightCard({required this.transactions}); @override Widget build(BuildContext context) { final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0); final days = List<double>.filled(7, 0); for (final tx in transactions) { final day = DateTime.fromMillisecondsSinceEpoch(tx.occurredAt).weekday - 1; days[day] += tx.amount; } final total = days.fold<double>(0, (a, b) => a + b); final top = transactions.isEmpty ? '' : (transactions.toList()..sort((a,b) => b.amount.compareTo(a.amount))).first.category; final maximum = days.fold<double>(0, (a,b) => a > b ? a : b); const labels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']; return Padding(padding: const EdgeInsets.only(left: 44, bottom: 14), child: FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('UPI spending · This week', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)), Text(money.format(total), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 31)), const SizedBox(height: 14), SizedBox(height: 110, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: List.generate(7, (i) => Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [Container(height: maximum == 0 ? 5 : 8 + 60 * days[i] / maximum, width: 18, decoration: BoxDecoration(color: FintechDesign.mint, borderRadius: BorderRadius.circular(9))), const SizedBox(height: 7), Text(labels[i], style: const TextStyle(fontSize: 10))])))), const SizedBox(height: 14), Wrap(spacing: 8, runSpacing: 8, children: [Chip(avatar: const Icon(Icons.payments_outlined, size: 17), label: Text('${transactions.length} payments')), if (top.isNotEmpty) Chip(avatar: const Icon(Icons.restaurant_outlined, size: 17), label: Text('Top: $top'))]) ])); }}
 class _VisualMetric extends StatelessWidget { final String label; final String value; final Color color; const _VisualMetric({required this.label, required this.value, required this.color}); @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: Theme.of(context).textTheme.bodySmall), const SizedBox(height: 4), Text(value, style: TextStyle(fontWeight: FontWeight.w900, color: color))]); }
+
+*/
+
+class _AdvisorWelcome extends StatelessWidget {
+  const _AdvisorWelcome();
+  @override
+  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.fromLTRB(8, 30, 8, 18), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    Row(children: [CircleAvatar(backgroundColor: FintechDesign.pale, child: const Icon(Icons.auto_awesome_rounded, color: FintechDesign.mint)), const SizedBox(width: 10), const Expanded(child: Text('Your private financial advisor', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900)))]),
+    const SizedBox(height: 8), const Text('Ask a question and get a live answer with the relevant money view.'),
+    const SizedBox(height: 18), Wrap(spacing: 8, runSpacing: 8, children: const [Chip(label: Text('UPI spending this week')), Chip(label: Text('Where did I spend most?')), Chip(label: Text('How is my budget?'))]),
+  ]));
+}
+
+class _AdvisorBubble extends StatelessWidget {
+  final String role, content;
+  final bool loading;
+  const _AdvisorBubble({required this.role, required this.content, this.loading = false});
+  @override
+  Widget build(BuildContext context) {
+    final user = role == 'user';
+    final bubble = Container(constraints: const BoxConstraints(maxWidth: 330), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13), decoration: BoxDecoration(color: user ? const Color(0xFFD6F4E5) : Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFDDE7E8))), child: loading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : SelectableText(content, style: const TextStyle(color: FintechDesign.ink, height: 1.4, fontSize: 16)));
+    return Padding(padding: const EdgeInsets.only(bottom: 12), child: Row(mainAxisAlignment: user ? MainAxisAlignment.end : MainAxisAlignment.start, crossAxisAlignment: CrossAxisAlignment.start, children: [if (!user) ...[CircleAvatar(radius: 18, backgroundColor: FintechDesign.pale, child: const Icon(Icons.smart_toy_outlined, color: FintechDesign.mint, size: 20)), const SizedBox(width: 8)], bubble]));
+  }
+}
+
+class _AdvisorVisualForQuery extends StatelessWidget {
+  final String query;
+  final double spent, income, budget;
+  final Map<String, double> categories;
+  final List<double> trend;
+  final List<TxRecord> upi;
+  const _AdvisorVisualForQuery({super.key, required this.query, required this.spent, required this.income, required this.budget, required this.categories, required this.trend, required this.upi});
+
+  @override
+  Widget build(BuildContext context) {
+    final q = query.toLowerCase();
+    if (q.contains('upi')) return _UpiInsightCard(transactions: upi);
+    final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
+    if (q.contains('budget') || q.contains('limit')) {
+      final ratio = budget <= 0 ? 0.0 : (spent / 6 / budget).clamp(0.0, 1.0).toDouble();
+      return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('Budget progress', style: TextStyle(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 6),
+        Text(budget <= 0 ? 'No monthly budget has been set yet.' : '${money.format(spent / 6)} average monthly spend of ${money.format(budget)} budget'),
+        if (budget > 0) ...[const SizedBox(height: 10), LinearProgressIndicator(value: ratio, minHeight: 9, borderRadius: BorderRadius.circular(9)), const SizedBox(height: 5), Text('${(ratio * 100).round()}% of monthly budget used on average')],
+      ]));
+    }
+    final maximum = trend.fold<double>(0, (a, b) => a > b ? a : b);
+    final now = DateTime.now();
+    return FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('Spending trend · last 6 months', style: TextStyle(fontWeight: FontWeight.w900)),
+      const SizedBox(height: 12),
+      SizedBox(height: 96, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: List.generate(6, (i) {
+        final value = i < trend.length ? trend[i] : 0.0;
+        return Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
+          Text(value == 0 ? '' : '${(value / 1000).toStringAsFixed(0)}k', style: const TextStyle(fontSize: 9)),
+          Container(height: maximum == 0 ? 5 : 8 + 45 * value / maximum, margin: const EdgeInsets.symmetric(horizontal: 3), decoration: BoxDecoration(color: FintechDesign.mint, borderRadius: BorderRadius.circular(6))),
+          const SizedBox(height: 5), Text(DateFormat.MMM().format(DateTime(now.year, now.month - 5 + i)), style: const TextStyle(fontSize: 9)),
+        ]));
+      }))),
+    ]));
+  }
+}
+
+class _UpiInsightCard extends StatelessWidget {
+  final List<TxRecord> transactions;
+  const _UpiInsightCard({required this.transactions});
+  @override
+  Widget build(BuildContext context) {
+    final money = NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
+    final days = List<double>.filled(7, 0);
+    for (final tx in transactions) { days[DateTime.fromMillisecondsSinceEpoch(tx.occurredAt).weekday - 1] += tx.amount; }
+    final total = days.fold<double>(0, (a, b) => a + b);
+    final maximum = days.fold<double>(0, (a, b) => a > b ? a : b);
+    const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return Padding(padding: const EdgeInsets.only(left: 44, bottom: 14), child: FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('UPI spending · This week', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
+      Text(money.format(total), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 31)),
+      const SizedBox(height: 14),
+      SizedBox(height: 110, child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: List.generate(7, (i) => Expanded(child: Column(mainAxisAlignment: MainAxisAlignment.end, children: [
+        Container(height: maximum == 0 ? 5 : 8 + 60 * days[i] / maximum, width: 18, decoration: BoxDecoration(color: FintechDesign.mint, borderRadius: BorderRadius.circular(9))),
+        const SizedBox(height: 7), Text(labels[i], style: const TextStyle(fontSize: 10)),
+      ]))))),
+      const SizedBox(height: 14),
+      Chip(avatar: const Icon(Icons.payments_outlined, size: 17), label: Text('${transactions.length} payments')),
+    ])));
+  }
+}
 
 class AiAdvisorSettingsPage extends StatefulWidget { const AiAdvisorSettingsPage({super.key}); @override State<AiAdvisorSettingsPage> createState() => _AiAdvisorSettingsPageState(); }
 class _AiAdvisorSettingsPageState extends State<AiAdvisorSettingsPage> { AiProvider _provider = AiProvider.gemini; late final TextEditingController _model = TextEditingController(); final _key = TextEditingController(); bool _showKey = false; bool _loading = true; @override void initState() { super.initState(); _restore(); } Future<void> _restore() async { final name = await AppDb.instance.getSetting('ai_agent_provider', fallback: AiProvider.gemini.name); final providers = AiProvider.values.where((v) => v.name == name).toList(); _provider = providers.isEmpty ? AiProvider.gemini : providers.first; _model.text = await AppDb.instance.getSetting('ai_agent_model', fallback: _provider.defaultModel); _key.text = await FinanceApiKeyVault.read(_provider) ?? ''; if (mounted) setState(() => _loading = false); } Future<void> _save() async { if (_key.text.trim().isEmpty || _model.text.trim().isEmpty) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter an API key and model name.'))); return; } await FinanceApiKeyVault.save(_provider, _key.text); await AppDb.instance.setSetting('ai_agent_provider', _provider.name); await AppDb.instance.setSetting('ai_agent_model', _model.text.trim()); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('AI provider saved securely on this device.'))); } @override void dispose() { _model.dispose(); _key.dispose(); super.dispose(); } @override Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: const Text('AI Advisor setup')), body: _loading ? const Center(child: CircularProgressIndicator()) : ListView(padding: const EdgeInsets.all(18), children: [const Text('Choose your own provider and API key. The key stays in Android secure storage.'), const SizedBox(height: 16), DropdownButtonFormField<AiProvider>(value: _provider, decoration: const InputDecoration(labelText: 'Provider'), items: AiProvider.values.map((v) => DropdownMenuItem(value: v, child: Text(v.label))).toList(), onChanged: (v) async { if (v == null) return; final key = await FinanceApiKeyVault.read(v); setState(() { _provider = v; _model.text = v.defaultModel; _key.text = key ?? ''; }); }), const SizedBox(height: 12), TextField(controller: _model, decoration: const InputDecoration(labelText: 'Model name')), const SizedBox(height: 12), TextField(controller: _key, obscureText: !_showKey, autocorrect: false, enableSuggestions: false, decoration: InputDecoration(labelText: '${_provider.label} API key', suffixIcon: IconButton(onPressed: () => setState(() => _showKey = !_showKey), icon: Icon(_showKey ? Icons.visibility_off_rounded : Icons.visibility_rounded)))), const SizedBox(height: 16), FilledButton.icon(onPressed: _save, icon: const Icon(Icons.save_outlined), label: const Text('Save AI setup')), const SizedBox(height: 20), const Text('Only a user-approved local finance summary is sent when you ask a question. Raw SMS, UPI references, account hints and notes are excluded.', style: TextStyle(height: 1.4))])); }
