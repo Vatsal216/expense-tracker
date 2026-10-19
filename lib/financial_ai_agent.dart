@@ -50,7 +50,7 @@ class FinanceApiKeyVault {
 class FinanceAgent {
   Future<String> ask({required AiAgentConfig config, required String apiKey, required String question}) async {
     final context = await _financeContext();
-    const system = '''You are an in-app finance advisor. Use only the supplied local summary and say when data is missing. Be concise, practical, and supportive. Do not invent numbers. Do not give personalised securities buy/sell recommendations, tax/legal advice, or instructions to take loans. You may explain spending patterns, budgeting options, cash-flow risks, and questions the user can ask a qualified professional. The summary never includes raw SMS, sender, UPI reference, account hint, or notes.''';
+    const system = '''You are an in-app finance advisor. Use only the supplied local summary and say when data is missing. Be concise, practical, and supportive. Do not invent numbers. Do not give personalised securities buy/sell recommendations, tax/legal advice, or instructions to take loans. You may explain spending patterns, budgeting options, cash-flow risks, and questions the user can ask a qualified professional. Reply in plain, easy-to-read text: use short headings followed by short sentences or bullet points. Never use Markdown syntax, tables, hash symbols, asterisks, or horizontal rules. The summary never includes raw SMS, sender, UPI reference, account hint, or notes.''';
     final prompt = '$system\n\nLOCAL FINANCE SUMMARY (user approved):\n${jsonEncode(context)}\n\nUSER QUESTION:\n${question.trim()}';
     return switch (config.provider) {
       AiProvider.openai => _openAi(config.model, apiKey, prompt),
@@ -74,11 +74,17 @@ class FinanceAgent {
     final cashFlow = results[1] as Map<String, double>;
     final categories = results[2] as Map<String, double>;
     final formatter = DateFormat('yyyy-MM-dd');
+    final paymentMethodTotals = <String, double>{};
+    for (final tx in records.where((item) => item.type == 'expense')) {
+      final method = _safePaymentMethod(tx.paymentMethod);
+      paymentMethodTotals[method] = (paymentMethodTotals[method] ?? 0) + tx.amount;
+    }
     return {
       'period': 'Last 90 days through ${formatter.format(now)}',
       'monthly_cash_flow': cashFlow,
       'monthly_budget': results[3],
       'expense_by_category': categories,
+      'expense_by_payment_method_last_90_days': paymentMethodTotals,
       'recent_transactions': records.map((tx) => {
             'date': formatter.format(DateTime.fromMillisecondsSinceEpoch(tx.occurredAt)),
             'amount': tx.amount,
@@ -88,6 +94,16 @@ class FinanceAgent {
           }).toList(),
       'privacy': 'No raw SMS, sender, UPI reference, account hint, or transaction note is included.',
     };
+  }
+
+  String _safePaymentMethod(String value) {
+    final method = value.trim().toLowerCase();
+    if (method.contains('upi')) return 'UPI';
+    if (method.contains('credit')) return 'Credit card';
+    if (method.contains('debit')) return 'Debit card';
+    if (method.contains('cash')) return 'Cash';
+    if (method.contains('bank') || method.contains('net')) return 'Bank transfer';
+    return 'Other';
   }
 
   Future<String> _openAi(String model, String key, String prompt) async => _requestText(
@@ -156,6 +172,7 @@ class AiAdvisorPage extends StatefulWidget {
 
 class _AiAdvisorPageState extends State<AiAdvisorPage> {
   final _question = TextEditingController();
+  final _questionFocus = FocusNode();
   bool _asking = false;
   bool _loading = true;
   List<Map<String, Object?>> _messages = const [];
@@ -226,8 +243,24 @@ class _AiAdvisorPageState extends State<AiAdvisorPage> {
     if (mounted) setState(() => _messages = const []);
   }
 
+  Future<void> _showComposerActions() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(leading: const Icon(Icons.edit_outlined), title: const Text('New question'), subtitle: const Text('Type a question for your advisor'), onTap: () => Navigator.pop(sheetContext, 'ask')),
+        ListTile(leading: const Icon(Icons.tune_rounded), title: const Text('AI Advisor setup'), subtitle: const Text('Provider, model and API key'), onTap: () => Navigator.pop(sheetContext, 'setup')),
+        if (_messages.isNotEmpty) ListTile(leading: const Icon(Icons.delete_outline_rounded), title: const Text('Clear chat history'), onTap: () => Navigator.pop(sheetContext, 'clear')),
+      ])),
+    );
+    if (!mounted || action == null) return;
+    if (action == 'ask') { _questionFocus.requestFocus(); }
+    if (action == 'clear') await _clearHistory();
+    if (action == 'setup') await Navigator.push(context, MaterialPageRoute(builder: (_) => const AiAdvisorSettingsPage()));
+  }
+
   @override
-  void dispose() { _question.dispose(); super.dispose(); }
+  void dispose() { _question.dispose(); _questionFocus.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -256,8 +289,8 @@ class _AiAdvisorPageState extends State<AiAdvisorPage> {
                       decoration: BoxDecoration(color: Theme.of(context).colorScheme.surface, border: Border(top: BorderSide(color: Theme.of(context).colorScheme.outline))),
                       padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                       child: Row(children: [
-                        IconButton(onPressed: () {}, icon: const Icon(Icons.add_circle_outline_rounded)),
-                        Expanded(child: TextField(controller: _question, textCapitalization: TextCapitalization.sentences, minLines: 1, maxLines: 4, onSubmitted: (_) => _ask(), decoration: const InputDecoration(hintText: 'Ask about spending, cards or budgets', prefixIcon: Icon(Icons.auto_awesome_rounded)))),
+                        IconButton(onPressed: _showComposerActions, tooltip: 'Chat options', icon: const Icon(Icons.add_circle_outline_rounded)),
+                        Expanded(child: TextField(focusNode: _questionFocus, controller: _question, textCapitalization: TextCapitalization.sentences, minLines: 1, maxLines: 4, onSubmitted: (_) => _ask(), decoration: const InputDecoration(hintText: 'Ask about spending, cards or budgets', prefixIcon: Icon(Icons.auto_awesome_rounded)))),
                         const SizedBox(width: 8),
                         IconButton.filled(onPressed: _asking ? null : _ask, icon: const Icon(Icons.arrow_upward_rounded)),
                       ]),
@@ -298,9 +331,29 @@ class _AdvisorBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final user = role == 'user';
-    final bubble = Container(constraints: const BoxConstraints(maxWidth: 330), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13), decoration: BoxDecoration(color: user ? const Color(0xFFD6F4E5) : Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFDDE7E8))), child: loading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : SelectableText(content, style: const TextStyle(color: FintechDesign.ink, height: 1.4, fontSize: 16)));
-    return Padding(padding: const EdgeInsets.only(bottom: 12), child: Row(mainAxisAlignment: user ? MainAxisAlignment.end : MainAxisAlignment.start, crossAxisAlignment: CrossAxisAlignment.start, children: [if (!user) ...[CircleAvatar(radius: 18, backgroundColor: FintechDesign.pale, child: const Icon(Icons.smart_toy_outlined, color: FintechDesign.mint, size: 20)), const SizedBox(width: 8)], bubble]));
+    final bubble = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+      decoration: BoxDecoration(color: user ? const Color(0xFFD6F4E5) : Colors.white, borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFFDDE7E8))),
+      child: loading ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : Text(_readableAdvisorText(content), style: const TextStyle(color: FintechDesign.ink, height: 1.48, fontSize: 16)),
+    );
+    if (user) {
+      return Padding(padding: const EdgeInsets.only(bottom: 12), child: Align(alignment: Alignment.centerRight, child: ConstrainedBox(constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * .76), child: bubble)));
+    }
+    return Padding(padding: const EdgeInsets.only(bottom: 12), child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [CircleAvatar(radius: 18, backgroundColor: FintechDesign.pale, child: const Icon(Icons.smart_toy_outlined, color: FintechDesign.mint, size: 20)), const SizedBox(width: 8), Expanded(child: bubble)]));
   }
+}
+
+String _readableAdvisorText(String raw) {
+  var text = raw.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  text = text.replaceAll(RegExp(r'^\s{0,3}#{1,6}\s*', multiLine: true), '');
+  text = text.replaceAll(RegExp(r'^\s*---+\s*$', multiLine: true), '');
+  text = text.replaceAllMapped(RegExp(r'\*\*(.+?)\*\*'), (match) => match.group(1) ?? '');
+  text = text.replaceAllMapped(RegExp(r'(?<!\*)\*([^*\n]+)\*(?!\*)'), (match) => match.group(1) ?? '');
+  text = text.replaceAllMapped(RegExp(r'`([^`]+)`'), (match) => match.group(1) ?? '');
+  text = text.replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '• ');
+  text = text.replaceAll(RegExp(r'^\s*\d+[.)]\s+', multiLine: true), '• ');
+  text = text.replaceAll(RegExp(r'\n[ \t]*\n[ \t]*\n+'), '\n\n');
+  return text.trim();
 }
 
 class _AdvisorVisualForQuery extends StatelessWidget {
@@ -353,7 +406,7 @@ class _UpiInsightCard extends StatelessWidget {
     final total = days.fold<double>(0, (a, b) => a + b);
     final maximum = days.fold<double>(0, (a, b) => a > b ? a : b);
     const labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    return Padding(padding: const EdgeInsets.only(left: 44, bottom: 14), child: FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    return Padding(padding: const EdgeInsets.only(bottom: 14), child: FintechSurface(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       const Text('UPI spending · This week', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 17)),
       Text(money.format(total), style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 31)),
       const SizedBox(height: 14),

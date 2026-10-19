@@ -9,6 +9,7 @@ object TransactionParser {
     private val accountRegex = Regex("(?i)(?:a/c|acct|account|card)[^0-9]*[xX*]*([0-9]{3,4})")
     private val noteRegex = Regex("(?i)(?:note|remark|message)\\s*[:=-]\\s*([^|,;]+)")
     private val toRegex = Regex("(?i)(?:to|at)\\s+([A-Za-z0-9 .&'_-]{2,40})")
+    private val merchantAtRegex = Regex("(?i)\\b(?:at|to)\\s+([A-Za-z][A-Za-z0-9 .&'_-]{1,40}?)(?=\\s+(?:on|dated|via|through|ref(?:erence)?|upi)\\b|[.,;]|$)")
 
     fun parseSms(db: ExpenseDatabase, sender: String, message: String, occurredAt: Long): ParsedTransaction? {
         val text = message.trim()
@@ -31,6 +32,8 @@ object TransactionParser {
         val accountHint = accountRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
         val paymentMethod = when {
             cardPayment -> "Bank → Credit Card"
+            lower.contains("credit card") && lower.contains("upi") -> "Credit Card • UPI"
+            lower.contains("credit card") -> "Credit Card"
             lower.contains("upi") -> "UPI"
             lower.contains("card") -> "Card"
             else -> "Bank"
@@ -53,31 +56,6 @@ object TransactionParser {
             classificationConfidence = decision.confidence,
             reviewStatus = if (decision.method == "low_confidence_review") "needs_review" else "accepted",
         )
-    }
-
-    /**
-     * Gmail content is classified by the exact same hybrid classifier and user
-     * rules as SMS.  The email text is deliberately not persisted: it is only
-     * used in-memory to create a privacy-safe ledger record.
-     */
-    fun parseGmail(db: ExpenseDatabase, messageId: String, sender: String, subject: String, body: String, occurredAt: Long): ParsedTransaction? {
-        val text = "$subject | $body".replace(Regex("\\s+"), " ").trim()
-        if (text.isBlank() || Regex("(?i)\\b(otp|one.time.password|verification code|unsubscribe|cashback offer)\\b").containsMatchIn(text)) return null
-        val amount = extractAmount(text) ?: return null
-        val lower = text.lowercase(Locale.ROOT)
-        if (!Regex("(?i)\\b(debited|spent|payment successful|transaction successful|paid|credited|refund|reversed)\\b").containsMatchIn(text)) return null
-        val rule = db.findRule(text)
-        val decision = classify(db, text, rule)
-        if (decision.label == "ignore" || decision.label == "pending") return null
-        val category = categoryFor(decision.label, lower, rule)
-        val cardPayment = decision.label == "transfer" && isCreditCardBillPayment(lower)
-        val merchant = if (cardPayment) extractCreditCardMerchant(text) ?: "Credit Card Payment" else rule?.merchant ?: extractMerchant(text) ?: sender.ifBlank { "Email payment" }
-        val upiReference = upiRefRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
-        val accountHint = accountRegex.find(text)?.groupValues?.getOrNull(1).orEmpty()
-        val method = when { cardPayment -> "Bank → Credit Card"; lower.contains("upi") -> "UPI"; lower.contains("card") -> "Card"; else -> "Bank" }
-        return ParsedTransaction(amount, decision.label, category, merchant, extractNote(text), "", sender, method, accountHint, upiReference,
-            occurredAt, fingerprint("gmail|$messageId"), decision.method, decision.confidence,
-            if (decision.method == "low_confidence_review") "needs_review" else "accepted")
     }
 
     fun parsePhonePeNotification(db: ExpenseDatabase, title: String, body: String, occurredAt: Long, appName: String = "PhonePe"): ParsedTransaction? {
@@ -134,7 +112,12 @@ object TransactionParser {
             else -> "Other Investment"
         }
         "income" -> if (lower.contains("salary")) "Salary" else if (rule?.type == "income") rule.category else "Uncategorized"
-        else -> rule?.category ?: "Uncategorized"
+        else -> when {
+            lower.contains("cash withdrawal") || lower.contains("cash withdrawn") -> "Cash Withdrawal"
+            lower.contains("emi") && lower.contains("credit card") -> "EMI & Loans"
+            listOf("annual fee", "joining fee", "late fee", "finance charge", "interest charge", "over limit fee", "cash advance fee", "gst").any { lower.contains(it) } && lower.contains("credit card") -> "Credit Card Fees"
+            else -> rule?.category ?: "Uncategorized"
+        }
     }
 
     private fun extractAmount(text: String): Double? {
@@ -143,7 +126,8 @@ object TransactionParser {
     }
 
     private fun extractMerchant(text: String): String? {
-        val match = toRegex.find(text)?.groupValues?.getOrNull(1)?.trim()?.trimEnd('.', ',')
+        val match = (merchantAtRegex.find(text)?.groupValues?.getOrNull(1)
+            ?: toRegex.find(text)?.groupValues?.getOrNull(1))?.trim()?.trimEnd('.', ',')
         return match?.takeIf { it.length in 2..40 }
     }
 

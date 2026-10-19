@@ -100,16 +100,6 @@ class SmsReclassifyResult {
       );
 }
 
-class GmailIngestResult {
-  final String status;
-  final int transactionId;
-  const GmailIngestResult({required this.status, required this.transactionId});
-  factory GmailIngestResult.fromMap(Map<dynamic, dynamic>? map) => GmailIngestResult(
-    status: '${map?['status'] ?? 'ignored'}',
-    transactionId: (map?['transactionId'] as num?)?.toInt() ?? 0,
-  );
-}
-
 class NativeBridge {
   static const MethodChannel _channel = MethodChannel('expense_tracker/native');
 
@@ -118,6 +108,12 @@ class NativeBridge {
 
   static Future<bool> hasSmsPermission() async =>
       (await _channel.invokeMethod<bool>('hasSmsPermission')) ?? false;
+
+  static Future<Map<String, String>> smsPipelineStatus() async {
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('smsPipelineStatus');
+    if (raw == null) return const {};
+    return {for (final entry in raw.entries) '${entry.key}': '${entry.value}'};
+  }
 
   static Future<bool> requestSmsHistoryPermission() async =>
       (await _channel.invokeMethod<bool>('requestSmsHistoryPermission')) ?? false;
@@ -133,19 +129,6 @@ class NativeBridge {
   static Future<SmsReclassifyResult> reclassifyStoredSms() async {
     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('reclassifyStoredSms');
     return SmsReclassifyResult.fromMap(raw);
-  }
-
-  /// Sends transient Gmail text to Android's canonical transaction pipeline.
-  /// The native layer classifies/deduplicates it and never stores the email body.
-  static Future<GmailIngestResult> ingestGmailEmail({
-    required String messageId, required String sender, required String subject,
-    required String body, required int occurredAt,
-  }) async {
-    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('ingestGmailEmail', {
-      'messageId': messageId, 'sender': sender, 'subject': subject,
-      'body': body, 'occurredAt': occurredAt,
-    });
-    return GmailIngestResult.fromMap(raw);
   }
 
   static Future<bool> requestNotificationPermission() async =>

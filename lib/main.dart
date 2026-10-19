@@ -8,7 +8,6 @@ import 'native_bridge.dart';
 import 'enhancements.dart';
 import 'financial_ai.dart';
 import 'financial_ai_agent.dart';
-import 'gmail_expense_service.dart';
 import 'fintech_design.dart';
 import 'cards_page.dart';
 
@@ -77,13 +76,11 @@ Future<void> _initializeServices() async {
     await safeTask('preferences', () => loadEnhancedPreferences());
     await safeTask('merchant normalization', () => AppDb.instance.normalizeExistingMerchants());
     await safeTask('account sync', () => AppDb.instance.syncAccountsFromTransactions());
-    final gmailSyncEnabled = await AppDb.instance.getBoolSetting('gmail_sync_enabled', fallback: false);
-    if (gmailSyncEnabled) {
-      await safeTask('gmail refresh', () async {
-        await GmailExpenseService().syncSilently();
-        expenseDataRevision.value++;
-      });
-    }
+    await safeTask('remove discontinued email imports', () async {
+      final removed = await AppDb.instance.removeGmailImportedTransactionsOnce();
+      if (removed > 0) expenseDataRevision.value++;
+    });
+    await safeTask('credit-card transaction linking', () => AppDb.instance.autoLinkCardTransactions());
     await safeTask('transfer matching', () async { await AppDb.instance.matchTransfers(); });
     await safeTask('deduplication', () async {
       final dedupResult = await AppDb.instance.smartDeduplicate();
@@ -132,8 +129,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     final selected = await showModalBottomSheet<int>(
       context: context,
       showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(sheetContext).height * .72),
+        child: SingleChildScrollView(child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 18),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             const ListTile(title: Text('More'), subtitle: Text('Plans, reports, advisor and settings')),
@@ -142,8 +141,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             ListTile(leading: const Icon(Icons.auto_awesome_rounded), title: const Text('AI Advisor'), subtitle: const Text('Ask about spending, UPI, cards and budgets'), onTap: () => Navigator.pop(sheetContext, 7)),
             ListTile(leading: const Icon(Icons.settings_rounded), title: const Text('Settings'), onTap: () => Navigator.pop(sheetContext, 6)),
           ]),
-        ),
-      ),
+        )),
+      )),
     );
     if (!mounted || selected == null) return;
     if (selected == 7) {
@@ -3764,6 +3763,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool smsEnabled = false;
   bool smsPermission = false;
   bool smsHistoryPermission = false;
+  String smsPipelineStatus = 'Checking SMS receiver…';
   bool importingHistory = false;
   bool reclassifyingSms = false;
   String historyStatus = 'Optional: scan older bank/payment SMS already on this phone';
@@ -3777,11 +3777,6 @@ class _SettingsPageState extends State<SettingsPage> {
   bool notificationPermission = false;
   bool summary = true;
   TimeOfDay summaryTime = const TimeOfDay(hour: 21, minute: 0);
-  bool gmailEnabled = false;
-  bool gmailSyncing = false;
-  String gmailEmail = '';
-  String gmailServerClientId = '';
-  String gmailStatus = 'Connect Gmail to import completed transaction receipts.';
 
   @override
   void initState() {
@@ -3793,6 +3788,10 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       smsEnabled = await AppDb.instance.getBoolSetting('sms_tracking_enabled');
       smsPermission = await NativeBridge.hasSmsPermission();
+      final pipeline = await NativeBridge.smsPipelineStatus();
+      final lastReceived = int.tryParse(pipeline['lastReceivedAt'] ?? '');
+      final status = pipeline['lastStatus'] ?? 'No status available';
+      smsPipelineStatus = lastReceived == null ? status : '$status · last SMS ${dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(lastReceived))}';
       smsHistoryPermission = await NativeBridge.hasSmsHistoryPermission();
       phonePeEnabled = await AppDb.instance.getBoolSetting('phonepe_notification_enabled');
       notificationAccess = await NativeBridge.hasNotificationListenerPermission();
@@ -3812,11 +3811,6 @@ class _SettingsPageState extends State<SettingsPage> {
         hour: int.tryParse(await AppDb.instance.getSetting('daily_summary_hour', fallback: '21')) ?? 21,
         minute: int.tryParse(await AppDb.instance.getSetting('daily_summary_minute', fallback: '0')) ?? 0,
       );
-      gmailEnabled = await AppDb.instance.getBoolSetting('gmail_sync_enabled', fallback: false);
-      gmailEmail = await AppDb.instance.getSetting('gmail_connected_email');
-      gmailServerClientId = await AppDb.instance.getSetting('gmail_server_client_id');
-      final syncedAt = int.tryParse(await AppDb.instance.getSetting('gmail_last_sync_at'));
-      if (gmailEnabled) gmailStatus = syncedAt == null ? 'Connected${gmailEmail.isEmpty ? '' : ' as $gmailEmail'} · not synced yet' : 'Connected${gmailEmail.isEmpty ? '' : ' as $gmailEmail'} · last sync ${dateTimeFmt.format(DateTime.fromMillisecondsSinceEpoch(syncedAt))}';
     } finally {
       if (mounted) setState(() => loading = false);
     }
@@ -3937,30 +3931,6 @@ class _SettingsPageState extends State<SettingsPage> {
     await NativeBridge.scheduleDailySummary(enabled: summary, hour: summaryTime.hour, minute: summaryTime.minute);
   }
 
-  Future<void> _syncGmail({bool connect = false}) async {
-    setState(() => gmailSyncing = true);
-    try {
-      final result = connect ? await GmailExpenseService().connectAndSync() : await GmailExpenseService().syncSilently();
-      gmailEnabled = true;
-      gmailEmail = await AppDb.instance.getSetting('gmail_connected_email');
-      gmailStatus = 'Scanned ${result.scanned} emails · imported ${result.imported} · ignored/duplicates ${result.ignored}';
-      widget.onChanged();
-    } catch (e) { gmailStatus = 'Gmail sync needs reconnection: ${e.toString().replaceFirst('Exception: ', '')}'; }
-    finally { if (mounted) setState(() => gmailSyncing = false); }
-  }
-
-  Future<void> _disconnectGmail() async {
-    await GmailExpenseService().disconnect();
-    if (mounted) setState(() { gmailEnabled = false; gmailEmail = ''; gmailStatus = 'Gmail disconnected. Existing imported transactions are kept.'; });
-  }
-
-  Future<void> _editGmailClientId() async {
-    final controller = TextEditingController(text: gmailServerClientId);
-    final saved = await showDialog<bool>(context: context, builder: (context) => AlertDialog(title: const Text('Google OAuth client ID'), content: TextField(controller: controller, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(hintText: '…apps.googleusercontent.com', helperText: 'Optional if your Android OAuth client is already configured.')), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save'))]));
-    if (saved == true) { gmailServerClientId = controller.text.trim(); await AppDb.instance.setSetting('gmail_server_client_id', gmailServerClientId); if (mounted) setState(() {}); }
-    controller.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
     if (loading) return const Center(child: CircularProgressIndicator());
@@ -3992,6 +3962,12 @@ class _SettingsPageState extends State<SettingsPage> {
                 await AppDb.instance.setSetting('sms_tracking_enabled', smsEnabled ? '1' : '0');
                 if (mounted) setState(() {});
               },
+            ),
+            ListTile(
+              leading: Icon(smsPipelineStatus.startsWith('Saved') || smsPipelineStatus.startsWith('Merged') ? Icons.check_circle_outline_rounded : Icons.sms_failed_outlined),
+              title: const Text('SMS receiver status'),
+              subtitle: Text(smsPipelineStatus),
+              trailing: TextButton(onPressed: load, child: const Text('Check')),
             ),
             ListTile(
               leading: const Icon(Icons.history_rounded),
@@ -4061,26 +4037,6 @@ class _SettingsPageState extends State<SettingsPage> {
                 subtitle: const Text('Enable Expense Tracker, then return and tap refresh.'),
                 trailing: TextButton(onPressed: NativeBridge.openNotificationAccessSettings, child: const Text('Open')),
               ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        SettingsBox(
-          title: 'Email expense tracking',
-          children: [
-            ListTile(
-              leading: const Icon(Icons.email_outlined),
-              title: Text(gmailEnabled ? 'Gmail connected${gmailEmail.isEmpty ? '' : ' · $gmailEmail'}' : 'Connect Gmail'),
-              subtitle: Text(gmailStatus),
-              trailing: gmailSyncing ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)) : FilledButton.tonal(onPressed: () => _syncGmail(connect: !gmailEnabled), child: Text(gmailEnabled ? 'Sync now' : 'Connect')),
-              onTap: gmailSyncing ? null : () => _syncGmail(connect: !gmailEnabled),
-            ),
-            const ListTile(
-              leading: Icon(Icons.privacy_tip_outlined),
-              title: Text('Read-only and deduplicated'),
-              subtitle: Text('Uses Google OAuth. Only completed finance emails are parsed; raw email bodies are not saved. Matching SMS/UPI transactions are not counted twice.'),
-            ),
-            ListTile(leading: const Icon(Icons.key_outlined), title: const Text('Google OAuth client ID'), subtitle: Text(gmailServerClientId.isEmpty ? 'Optional setup value · see GMAIL_SETUP.md' : 'Configured'), trailing: const Icon(Icons.chevron_right_rounded), onTap: _editGmailClientId),
-            if (gmailEnabled) ListTile(leading: const Icon(Icons.link_off_rounded), title: const Text('Disconnect Gmail'), subtitle: const Text('Stops future sync; does not delete existing transactions.'), onTap: _disconnectGmail),
           ],
         ),
         const SizedBox(height: 14),

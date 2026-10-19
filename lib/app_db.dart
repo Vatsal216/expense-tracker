@@ -226,6 +226,7 @@ class AppDb {
       ('Shopping', 'expense'), ('Entertainment', 'expense'), ('Bills & Utilities', 'expense'),
       ('Healthcare', 'expense'), ('Travel', 'expense'), ('Education', 'expense'),
       ('Rent & Housing', 'expense'), ('EMI & Loans', 'expense'), ('Insurance', 'expense'),
+      ('Cash Withdrawal', 'expense'), ('Credit Card Fees', 'expense'),
       ('Stocks', 'investment'), ('Mutual Funds', 'investment'), ('Gold', 'investment'),
       ('Other Investment', 'investment'), ('Salary', 'income'), ('Refund', 'refund'),
       ('Transfer', 'transfer'), ('Credit Card Payment', 'transfer'), ('Uncategorized', 'expense'),
@@ -436,7 +437,7 @@ class AppDb {
       for (final row in rows) {
         final tx = TxRecord.fromMap(row);
         final text = '${tx.rawMessage} ${tx.paymentMethod} ${tx.merchant}'.toLowerCase();
-        final isBillPayment = RegExp(r'credit\s*card\s*bill|card\s*bill\s*payment|cc\s*payment|card\s*payment').hasMatch(text);
+        final isBillPayment = (tx.type == 'transfer' && tx.category == 'Credit Card Payment') || RegExp(r'credit\s*card\s*bill|card\s*bill\s*payment|cc\s*payment|card\s*payment').hasMatch(text);
         final type = isBillPayment ? 'payment' : 'purchase';
         await addCardLedgerEntry(cardId: card.id!, transactionId: tx.id, entryType: type, amount: tx.amount, occurredAt: tx.occurredAt, merchant: tx.merchant, note: isBillPayment ? 'Auto-linked bill payment' : 'Auto-linked card transaction');
       }
@@ -496,8 +497,8 @@ class AppDb {
     return id;
   }
 
-  /// Adds source evidence for pre-pipeline records once. New SMS, app and
-  /// Gmail events write this at ingestion time in the Android native layer.
+  /// Adds source evidence for pre-pipeline records once. New SMS and app
+  /// notifications write this at ingestion time in the Android native layer.
   Future<void> backfillTransactionEvidence() async {
     final db = await database;
     final rows = await db.query('transactions', columns: [
@@ -517,6 +518,25 @@ class AppDb {
       }, conflictAlgorithm: ConflictAlgorithm.ignore);
     }
     await batch.commit(noResult: true);
+  }
+
+  /// Email import was discontinued. Remove its old records once so reports,
+  /// budgets and card totals are based only on SMS, notifications and entries
+  /// the user created in the app.
+  Future<int> removeGmailImportedTransactionsOnce() async {
+    if (await getBoolSetting('gmail_removed_v37', fallback: false)) return 0;
+    final db = await database;
+    final removed = await db.transaction((txn) async {
+      await txn.delete(
+        'card_ledger_entries',
+        where: 'transaction_id IN (SELECT id FROM transactions WHERE source=?)',
+        whereArgs: const ['gmail'],
+      );
+      return txn.delete('transactions', where: 'source=?', whereArgs: const ['gmail']);
+    });
+    await setSetting('gmail_removed_v37', '1');
+    if (removed > 0) notifyLedgerChanged();
+    return removed;
   }
 
   bool _unsafeBroadRule(String keyword) {

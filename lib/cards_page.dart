@@ -150,7 +150,25 @@ class _CardReportHero extends StatelessWidget {
   const _CardReportHero({required this.card, required this.outstanding, required this.utilisation, required this.onPaid});
   @override Widget build(BuildContext context) => Container(padding: const EdgeInsets.all(20), decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF064B44), Color(0xFF089667), Color(0xFF39C584)]), borderRadius: BorderRadius.circular(26), boxShadow: const [BoxShadow(color: Color(0x26006443), blurRadius: 24, offset: Offset(0, 10))]), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(card.issuer.isEmpty ? 'CREDIT CARD' : card.issuer.toUpperCase(), style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w700)), const SizedBox(height: 4), Text(card.name, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900)), const SizedBox(height: 4), Text('••••  ••••  ••••  ${card.lastFour.isEmpty ? '—' : card.lastFour}', style: const TextStyle(color: Colors.white, fontSize: 16, letterSpacing: 1.5)), const SizedBox(height: 22), Row(children: [Expanded(child: _HeroMetric(label: 'Credit limit', value: _cardMoney.format(card.creditLimit))), Expanded(child: _HeroMetric(label: 'Outstanding', value: _cardMoney.format(outstanding))), Expanded(child: _HeroMetric(label: 'Utilisation', value: '${(utilisation * 100).round()}%'))]), const SizedBox(height: 12), LinearProgressIndicator(value: utilisation, minHeight: 8, borderRadius: BorderRadius.circular(9), color: const Color(0xFF8EFA64), backgroundColor: Colors.white30), const SizedBox(height: 14), Align(alignment: Alignment.centerRight, child: FilledButton.icon(style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: const Color(0xFF087A57)), onPressed: onPaid, icon: const Icon(Icons.check_circle_outline), label: const Text('Mark bill paid')))]));
 }
-class _HeroMetric extends StatelessWidget { final String label; final String value; const _HeroMetric({required this.label, required this.value}); @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(label, style: const TextStyle(color: Colors.white70, fontSize: 11)), const SizedBox(height: 3), Text(value, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w900))]); }
+class _HeroMetric extends StatelessWidget {
+  final String label;
+  final String value;
+  const _HeroMetric({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+          const SizedBox(height: 3),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(value, maxLines: 1, style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w900)),
+          ),
+        ],
+      );
+}
 
 class _InsightBars extends StatelessWidget {
   final String title; final List<Map<String, Object?>> rows; final String emptyText;

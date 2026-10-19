@@ -38,11 +38,11 @@ class MainActivity : FlutterFragmentActivity() {
             when (call.method) {
                 "requestSmsPermission" -> requestSmsPermission(result)
                 "hasSmsPermission" -> result.success(hasSmsPermission())
+                "smsPipelineStatus" -> result.success(smsPipelineStatus())
                 "requestSmsHistoryPermission" -> requestSmsHistoryPermission(result)
                 "hasSmsHistoryPermission" -> result.success(hasSmsHistoryPermission())
                 "importHistoricalSms" -> importHistoricalSms(result)
                 "reclassifyStoredSms" -> reclassifyStoredSms(result)
-                "ingestGmailEmail" -> ingestGmailEmail(call.arguments as? Map<*, *>, result)
                 "requestNotificationPermission" -> requestNotificationPermission(result)
                 "hasNotificationPermission" -> result.success(hasNotificationPermission())
                 "hasNotificationListenerPermission" -> result.success(hasNotificationListenerPermission())
@@ -86,29 +86,27 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
-    private fun ingestGmailEmail(args: Map<*, *>?, result: MethodChannel.Result) {
-        try {
-            val messageId = args?.get("messageId")?.toString().orEmpty()
-            val sender = args?.get("sender")?.toString().orEmpty()
-            val subject = args?.get("subject")?.toString().orEmpty()
-            val body = args?.get("body")?.toString().orEmpty()
-            val occurredAt = (args?.get("occurredAt") as? Number)?.toLong() ?: System.currentTimeMillis()
-            if (messageId.isBlank()) { result.error("invalid_email", "Missing Gmail message ID", null); return }
-            result.success(ExpenseDatabase(this).ingestGmailEmail(messageId, sender, subject, body, occurredAt))
-        } catch (e: Exception) { result.error("gmail_ingest_failed", e.message, null) }
-    }
-
     private fun hasSmsPermission(): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
             checkSelfPermission(Manifest.permission.RECEIVE_SMS) == PackageManager.PERMISSION_GRANTED
 
     private fun requestSmsPermission(result: MethodChannel.Result) {
         if (hasSmsPermission()) {
+            ExpenseDatabase(applicationContext).setSetting("sms_tracking_enabled", "1")
             result.success(true)
             return
         }
         pendingSmsResult = result
         requestPermissions(arrayOf(Manifest.permission.RECEIVE_SMS), smsRequestCode)
+    }
+
+    private fun smsPipelineStatus(): Map<String, String> {
+        val db = ExpenseDatabase(applicationContext)
+        return mapOf(
+            "tracking" to db.getSetting("sms_tracking_enabled", "0"),
+            "lastReceivedAt" to db.getSetting("sms_pipeline_last_received_at", ""),
+            "lastStatus" to db.getSetting("sms_pipeline_last_status", "No SMS received since this version was installed"),
+        )
     }
 
     private fun hasSmsHistoryPermission(): Boolean =
@@ -488,6 +486,7 @@ class MainActivity : FlutterFragmentActivity() {
         val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
         when (requestCode) {
             smsRequestCode -> {
+                if (granted) ExpenseDatabase(applicationContext).setSetting("sms_tracking_enabled", "1")
                 pendingSmsResult?.success(granted)
                 pendingSmsResult = null
             }

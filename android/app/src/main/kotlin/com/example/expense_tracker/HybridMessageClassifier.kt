@@ -38,7 +38,7 @@ object HybridMessageClassifier {
         val currencyAmount = Regex("""(?:₹|\brs\.?|\binr\b)\s*[0-9][0-9,]*(?:\.[0-9]{1,2})?""")
             .containsMatchIn(lower)
         val completedMoneyMovement = Regex(
-            """\b(debited|deducted|credited|withdrawn|paid|spent|received|sent|refunded|transferred|purchased|invested)\b|payment successful|transaction successful|payment completed|order executed|units allotted"""
+            """\b(debited|deducted|credited|withdrawn|paid|spent|received|sent|refunded|transferred|purchased|invested)\b|cash withdrawal|payment successful|transaction successful|payment completed|order executed|units allotted"""
         ).containsMatchIn(lower)
         if (!currencyAmount || !completedMoneyMovement) {
             return decision("ignore", 1.0, "hard_gate", "ignore", 1.0,
@@ -210,6 +210,9 @@ object HybridMessageClassifier {
                 (lower.contains("payment of") && lower.contains("has been received")) ||
                 lower.contains("payment received towards") ||
                 lower.contains("payment received for") ||
+                lower.contains("payment received against") ||
+                lower.contains("payment received on your") ||
+                lower.contains("payment has been received") ||
                 lower.contains("credit card payment received") ||
                 lower.contains("received towards your") ||
                 (lower.contains("thank you for your payment") && lower.contains("card")) ||
@@ -225,7 +228,8 @@ object HybridMessageClassifier {
     private fun contextOverride(lower: String, neural: NeuralPrediction): HybridDecision? {
         val completedRefund = listOf(
             "refunded", "refund credited", "refund has been credited", "credited back",
-            "returned to your account", "refund successful", "amount refunded"
+            "returned to your account", "refund successful", "amount refunded", "reversal credited",
+            "reversed and credited"
         ).any { lower.contains(it) }
         if (completedRefund) {
             return decision("refund", 0.99, "context_override", neural.label, neural.confidence, "confirmed refund/credit-back context")
@@ -254,6 +258,32 @@ object HybridMessageClassifier {
         ).any { lower.contains(it) }
         if (credit && !lower.contains("credited back")) {
             return decision("income", 0.96, "context_override", neural.label, neural.confidence, "credit/income context")
+        }
+
+        // Common bank wording: "PNB Credit Card 4872 debited with Rs.7200 at
+        // FASHION FIESTA through UPI". This is a completed card purchase, not
+        // a card bill settlement or an offer, so it must not depend on ML score.
+        val cardPurchase = lower.contains("credit card") &&
+            Regex("\\b(?:debited|charged|spent)\\b").containsMatchIn(lower) &&
+            Regex("(?:rs\\.?|inr|₹)\\s*[0-9][0-9,]*(?:\\.[0-9]{1,2})?").containsMatchIn(lower)
+        if (cardPurchase) {
+            return decision("expense", 0.99, "context_override", neural.label, neural.confidence, "confirmed credit-card purchase")
+        }
+
+        val cardCashWithdrawal = lower.contains("credit card") &&
+            (lower.contains("cash withdrawal") || lower.contains("cash withdrawn")) &&
+            Regex("(?:rs\\.?|inr|₹)\\s*[0-9][0-9,]*(?:\\.[0-9]{1,2})?").containsMatchIn(lower)
+        if (cardCashWithdrawal) {
+            return decision("expense", 0.99, "context_override", neural.label, neural.confidence, "confirmed credit-card cash withdrawal")
+        }
+
+        // Restore a deterministic fallback for regular bank wording such as
+        // "Rs 1,200 debited from account" or "Debit of Rs 900 at merchant".
+        // Scheduled debits were already rejected in hardGate above.
+        val confirmedDebit = Regex("\\b(?:debited|debit\\s+of|deducted|charged|spent|withdrawn|paid)\\b.{0,55}(?:rs\\.?|inr|₹)\\s*[0-9][0-9,]*(?:\\.[0-9]{1,2})?", RegexOption.IGNORE_CASE).containsMatchIn(lower) ||
+            Regex("(?:rs\\.?|inr|₹)\\s*[0-9][0-9,]*(?:\\.[0-9]{1,2})?.{0,55}\\b(?:debited|deducted|charged|spent|withdrawn|paid)\\b", RegexOption.IGNORE_CASE).containsMatchIn(lower)
+        if (confirmedDebit) {
+            return decision("expense", 0.94, "context_override", neural.label, neural.confidence, "confirmed debit wording")
         }
 
         val debit = listOf(

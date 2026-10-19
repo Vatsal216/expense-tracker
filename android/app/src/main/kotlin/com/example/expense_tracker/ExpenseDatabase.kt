@@ -157,6 +157,7 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
             "Shopping" to "expense", "Entertainment" to "expense", "Bills & Utilities" to "expense",
             "Healthcare" to "expense", "Travel" to "expense", "Education" to "expense",
             "Rent & Housing" to "expense", "EMI & Loans" to "expense", "Insurance" to "expense",
+            "Cash Withdrawal" to "expense", "Credit Card Fees" to "expense",
             "Stocks" to "investment", "Mutual Funds" to "investment", "Gold" to "investment",
             "Other Investment" to "investment", "Salary" to "income", "Refund" to "refund",
             "Transfer" to "transfer", "Credit Card Payment" to "transfer", "Uncategorized" to "expense"
@@ -229,6 +230,11 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
     fun getSetting(key: String, fallback: String): String = readableDatabase
         .rawQuery("SELECT value FROM settings WHERE key=? LIMIT 1", arrayOf(key))
         .use { c -> if (c.moveToFirst()) c.getString(0) else fallback }
+
+    fun setSetting(key: String, value: String) {
+        val values = ContentValues().apply { put("key", key); put("value", value) }
+        writableDatabase.insertWithOnConflict("settings", null, values, SQLiteDatabase.CONFLICT_REPLACE)
+    }
 
     fun findRule(fullText: String): RuleMatch? {
         val text = fullText.lowercase(Locale.ROOT)
@@ -320,13 +326,8 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
 
     private fun findDuplicateCandidate(tx: ParsedTransaction, source: String, normalized: String): DuplicateCandidate? {
         if (getSetting("smart_dedup_enabled", "1") != "1") return null
-        // Email receipts can arrive long after an SMS/app alert.  Keep the
-        // wider Gmail window strict by also requiring merchant/card/reference
-        // evidence below, so equal-value unrelated purchases never collapse.
-        val gmailWindow = source == "gmail"
-        val windowMs = if (gmailWindow) 36 * 60 * 60 * 1000L else 10 * 60 * 1000L
-        val start = tx.occurredAt - windowMs
-        val end = tx.occurredAt + windowMs
+        val start = tx.occurredAt - 10 * 60 * 1000L
+        val end = tx.occurredAt + 10 * 60 * 1000L
         var best: DuplicateCandidate? = null
         var bestScore = Long.MIN_VALUE
 
@@ -355,11 +356,8 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
                     continue
                 }
 
-                val candidateIsGmail = candidate.source == "gmail"
                 val crossSource = (source == "sms" && isNotificationSource(candidate.source)) ||
-                    (candidate.source == "sms" && isNotificationSource(source)) ||
-                    (source == "gmail" && candidate.source != "gmail") ||
-                    (candidateIsGmail && source != "gmail")
+                    (candidate.source == "sms" && isNotificationSource(source))
                 if (!crossSource) continue
 
                 if (candidate.accountHint.isNotBlank() && tx.accountHint.isNotBlank() && candidate.accountHint != tx.accountHint) continue
@@ -372,15 +370,7 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
                 val upiMatch = isUpiLike(candidate.paymentMethod, candidate.rawMessage, candidate.merchant) &&
                     isUpiLike(tx.paymentMethod, tx.rawMessage, tx.merchant)
 
-                val usesGmail = source == "gmail" || candidateIsGmail
-                val cardMatch = candidate.accountHint.isNotBlank() && tx.accountHint.isNotBlank() && candidate.accountHint == tx.accountHint
-                val qualifies = when {
-                    usesGmail && merchantMatch && diff <= 36 * 60 * 60 * 1000L -> true
-                    usesGmail && cardMatch && diff <= 24 * 60 * 60 * 1000L -> true
-                    merchantMatch && diff <= 5 * 60 * 1000L -> true
-                    upiMatch && diff <= 3 * 60 * 1000L -> true
-                    else -> false
-                }
+                val qualifies = (merchantMatch && diff <= 5 * 60 * 1000L) || (upiMatch && diff <= 3 * 60 * 1000L)
                 if (!qualifies) continue
 
                 val score = when {
@@ -510,17 +500,6 @@ class ExpenseDatabase(context: Context) : SQLiteOpenHelper(context, "expense_tra
         val id = writableDatabase.insertWithOnConflict("transactions", null, v, SQLiteDatabase.CONFLICT_IGNORE)
         if (id > 0) addEvidence(id, source, tx.fingerprint, tx)
         return id
-    }
-
-    fun ingestGmailEmail(messageId: String, sender: String, subject: String, body: String, occurredAt: Long): Map<String, Any> {
-        val parsed = TransactionParser.parseGmail(this, messageId, sender, subject, body, occurredAt)
-            ?: return mapOf("status" to "ignored")
-        val id = insertTransaction(parsed, "gmail")
-        return when {
-            id > 0 -> mapOf("status" to "imported", "transactionId" to id)
-            id < -1 -> mapOf("status" to "merged", "transactionId" to -id)
-            else -> mapOf("status" to "duplicate")
-        }
     }
 
     fun reclassifyStoredSms(): Map<String, Int> {
